@@ -1,0 +1,8 @@
+torch
+transformers
+numpy
+pandas
+scikit-learn
+tqdm
+wandb
+huggingface_hub
