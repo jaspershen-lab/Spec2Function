@@ -7,7 +7,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="spec2function",
-    version="0.1.1",
+    version="0.1.2",
     description="Deep learning model for MS2 data annotation",
     author="User",
     long_description=README,
@@ -27,6 +27,7 @@ setup(
         "tqdm",
         "wandb",
         "huggingface_hub",
+        "python-dotenv",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

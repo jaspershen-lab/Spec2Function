@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: spec2function
-Version: 0.1.1
+Version: 0.1.2
 Summary: Deep learning model for MS2 data annotation
 Home-page: https://huggingface.co/cgxjdzz/ms2function-assets
 Author: User
@@ -17,6 +17,7 @@ Requires-Dist: scikit-learn
 Requires-Dist: tqdm
 Requires-Dist: wandb
 Requires-Dist: huggingface_hub
+Requires-Dist: python-dotenv
 Dynamic: author
 Dynamic: classifier
 Dynamic: description
