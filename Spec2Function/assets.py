@@ -64,7 +64,7 @@ def resolve_assets_root(project_root: Optional[Path]) -> Path:
         if _has_required_files(project_root):
             return project_root
 
-    repo_id = os.getenv("MS2FUNCTION_ASSET_REPO", "cgxjdzz/spec2function-assets")
+    repo_id = os.getenv("MS2FUNCTION_ASSET_REPO", "cgxjdzz/ms2function-assets")
     cache_root = _default_cache_dir()
     _download_assets(cache_root, repo_id, REQUIRED_ASSETS)
     if not _has_required_files(cache_root):

@@ -6,6 +6,9 @@ from pathlib import Path
 import os
 from typing import Optional
 from .assets import resolve_assets_root
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Spec2FunctionConfig:
     """Global configuration manager."""
