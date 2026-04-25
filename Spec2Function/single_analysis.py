@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, BertModel
+from transformers import AutoModel
 
 try:
     from .model.MS2BioText import MS2BioText
@@ -47,9 +48,8 @@ class MS2BioTextAnalysisConfig:
     msbert_kernel_size: int = 3
 
     @classmethod
-    def from_ms2function_root(cls, project_root: Path) -> "MS2BioTextAnalysisConfig":
-        root = Path(project_root)
-        asset_root = resolve_assets_root(root)
+    def from_spec2function_root(cls, project_root: Optional[Path] = None) -> "MS2BioTextAnalysisConfig":
+        asset_root = resolve_assets_root(project_root)
         return cls(
             model_checkpoint=asset_root / "models" / "best_model.pth",
             model_config=asset_root / "models" / "config.json",
@@ -64,7 +64,7 @@ def preprocess_spectrum(
     mz: List[float],
     intensity: List[float],
     max_peaks: int = 100,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     mz = np.array(mz, dtype=np.float32)
     intensity = np.array(intensity, dtype=np.float32)
 
@@ -83,46 +83,53 @@ def preprocess_spectrum(
     return mz, intensity
 
 
-def build_gpt_pubmed_from_ms2function_root(project_root: Path) -> Tuple[object, object]:
+def build_gpt_pubmed_from_spec2function_root(
+    project_root: Optional[Path] = None,
+) -> Tuple[Optional[object], object]:
+    """Construct (GPTInference, PubMedSearcher) from environment / global config.
+
+    Returns (None, PubMedSearcher) if no LLM key is configured.
     """
-    Backwards-compatible helper.
-
-    This used to depend on MS2Function's `backend` module. MS2BioText now ships its own
-    `GPTInference` (OpenAI-compatible chat API; defaults to SiliconFlow) and `PubMedSearcher`.
-
-    Configuration is taken from environment variables:
-      - SILICONFLOW_API_KEY (recommended) or MS2BIOTEXT_LLM_API_KEY
-      - MS2BIOTEXT_LLM_BASE_URL (default: https://api.siliconflow.cn/v1)
-      - MS2BIOTEXT_LLM_MODEL (default: Qwen/Qwen2.5-72B-Instruct)
-      - MS2BIOTEXT_PUBMED_EMAIL / PUBMED_EMAIL (optional)
-    """
-
-    from .llm import GPTInference
+    from .gpt_inference import GPTInference
     from .pubmed import PubMedSearcher
+    from .config import config as global_config
 
-    try:
-        gpt = GPTInference.from_env()
-    except ValueError:
+    api_key = global_config.resolve_llm_api_key()
+    if api_key:
+        gpt = GPTInference(
+            api_key=api_key,
+            model=global_config.llm_model or global_config.gpt_model,
+            max_tokens=global_config.gpt_max_tokens,
+            temperature=global_config.gpt_temperature,
+            provider=global_config.llm_provider,
+            base_url=global_config.llm_base_url or None,
+        )
+    else:
         gpt = None
         print("GPT disabled: missing LLM API key.")
-    email = os.getenv("MS2BIOTEXT_PUBMED_EMAIL") or os.getenv("PUBMED_EMAIL")
+
+    email = (
+        os.getenv("MS2BIOTEXT_PUBMED_EMAIL")
+        or os.getenv("PUBMED_EMAIL")
+        or global_config.pubmed_email
+    )
     pubmed = PubMedSearcher(email=email)
     return gpt, pubmed
 
 
 class SingleSpectrumAnalyzer:
     @classmethod
-    def create_from_ms2function_root(
+    def create_from_spec2function_root(
         cls,
-        project_root: Path,
+        project_root: Optional[Path] = None,
         device: Optional[torch.device] = None,
         enable_gpt_pubmed: bool = True,
     ) -> "SingleSpectrumAnalyzer":
-        config = MS2BioTextAnalysisConfig.from_ms2function_root(project_root)
+        config = MS2BioTextAnalysisConfig.from_spec2function_root(project_root)
         gpt = None
         pubmed = None
         if enable_gpt_pubmed:
-            gpt, pubmed = build_gpt_pubmed_from_ms2function_root(project_root)
+            gpt, pubmed = build_gpt_pubmed_from_spec2function_root(project_root)
         return cls(config, device=device, gpt=gpt, pubmed=pubmed)
 
     def __init__(

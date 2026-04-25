@@ -17,19 +17,22 @@ from .single_analysis import SingleSpectrumAnalyzer, preprocess_spectrum
 
 class MetaboliteSetAnalyzer(SingleSpectrumAnalyzer):
     @classmethod
-    def create_from_ms2function_root(
+    def create_from_spec2function_root(
         cls,
-        project_root: Path,
+        project_root: Optional[Path] = None,
         device: Optional[torch.device] = None,
         enable_gpt_pubmed: bool = True,
     ) -> "MetaboliteSetAnalyzer":
-        from .single_analysis import MS2BioTextAnalysisConfig, build_gpt_pubmed_from_ms2function_root
+        from .single_analysis import (
+            MS2BioTextAnalysisConfig,
+            build_gpt_pubmed_from_spec2function_root,
+        )
 
-        config = MS2BioTextAnalysisConfig.from_ms2function_root(project_root)
+        config = MS2BioTextAnalysisConfig.from_spec2function_root(project_root)
         gpt = None
         pubmed = None
         if enable_gpt_pubmed:
-            gpt, pubmed = build_gpt_pubmed_from_ms2function_root(project_root)
+            gpt, pubmed = build_gpt_pubmed_from_spec2function_root(project_root)
         return cls(config, device=device, gpt=gpt, pubmed=pubmed)
 
     def encode_ms2_batch(self, spectra_list: List[Dict], batch_size: int = 64) -> torch.Tensor:

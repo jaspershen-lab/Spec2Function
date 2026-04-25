@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from setuptools import setup, find_packages
 
@@ -7,30 +7,37 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="spec2function",
-    version="0.1.2",
-    description="Deep learning model for MS2 data annotation",
-    author="User",
+    version="0.1.3",
+    description="Deep learning model for MS2 spectrum annotation and metabolite set analysis",
+    author="Feifan Zhang",
     long_description=README,
     long_description_content_type="text/markdown",
     url="https://huggingface.co/cgxjdzz/ms2function-assets",
 
-    # 閾ｪ蜉ｨ譟･謇ｾ蠖灘燕逶ｮ蠖穂ｸ狗噪蛹?(霑咎㈹蜿ｪ莨壽伽蛻ｰ MS2BioText)
-    packages=find_packages(),
+    packages=find_packages(exclude=("tests", "examples", "dist")),
+    include_package_data=True,
 
-    python_requires=">=3.8",
+    python_requires=">=3.10",
     install_requires=[
-        "torch",
-        "transformers",
-        "numpy",
-        "pandas",
-        "scikit-learn",
-        "tqdm",
-        "wandb",
-        "huggingface_hub",
-        "python-dotenv",
+        "torch>=2.0",
+        "transformers>=4.35",
+        "numpy>=1.24",
+        "pandas>=2.0",
+        "scikit-learn>=1.3",
+        "tqdm>=4.65",
+        "huggingface_hub>=0.20",
+        "python-dotenv>=1.0",
+        "openai>=1.30",
     ],
+    extras_require={
+        "train": ["wandb>=0.16"],
+    },
     classifiers=[
         "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
         "Operating System :: OS Independent",
+        "Intended Audience :: Science/Research",
+        "Topic :: Scientific/Engineering :: Bio-Informatics",
     ],
 )

@@ -55,7 +55,7 @@ class Spec2FunctionConfig:
         self.gpt_temperature = 0.4  # Previously missing line that caused errors
 
         # LLM provider params
-        self.llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+        self.llm_provider = os.getenv("LLM_PROVIDER", "siliconflow").lower()
         self.llm_api_key = os.getenv("LLM_API_KEY", "")
         self.llm_base_url = os.getenv("LLM_BASE_URL", "")
         self.llm_model = os.getenv("LLM_MODEL", "")
