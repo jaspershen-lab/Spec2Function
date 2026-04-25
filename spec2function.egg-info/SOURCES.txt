@@ -13,6 +13,8 @@ Spec2Function/llm_client.py
 Spec2Function/model_manager.py
 Spec2Function/pubmed.py
 Spec2Function/read_raw_data.py
+Spec2Function/set_analysis.py
+Spec2Function/single_analysis.py
 Spec2Function/utils.py
 Spec2Function/workflow.py
 Spec2Function/model/MS2BioText.py

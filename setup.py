@@ -7,12 +7,14 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="spec2function",
-    version="0.1.3",
+    version="0.2.0",
     description="Deep learning model for MS2 spectrum annotation and metabolite set analysis",
     author="Feifan Zhang",
     long_description=README,
     long_description_content_type="text/markdown",
     url="https://huggingface.co/cgxjdzz/ms2function-assets",
+    license="PolyForm-Noncommercial-1.0.0",
+    license_files=("LICENSE",),
 
     packages=find_packages(exclude=("tests", "examples", "dist")),
     include_package_data=True,
@@ -36,6 +38,7 @@ setup(
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "License :: Other/Proprietary License",
         "Operating System :: OS Independent",
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Bio-Informatics",

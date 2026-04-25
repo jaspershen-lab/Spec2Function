@@ -264,4 +264,17 @@ plt.show()
 
 ## License
 
-See `LICENSE`.
+Spec2Function is licensed under the **PolyForm Noncommercial License 1.0.0**
+(starting from version 0.2.0). You may use, modify, and redistribute the code
+for any **noncommercial** purpose — academic research, education, personal
+study, and use by nonprofit / public-research / government organizations all
+qualify.
+
+**Commercial use** (any use that is for, or directed toward, commercial
+advantage or monetary compensation) requires a separate license. Contact
+<xiaotao.shen@ntu.edu.sg> to negotiate commercial terms.
+
+Versions **0.1.x and earlier** were released under the MIT License and remain
+under MIT — this license change applies only to 0.2.0 and later releases.
+
+See `LICENSE` for the full license text.
