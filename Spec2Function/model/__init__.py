@@ -26,7 +26,7 @@ from .MS2BioText import (
 from .MSBERT import MSBERT
 
 __all__ = [
-    # 配置相关
+    # Config
     "get_base_config",
     "get_projection_only_config", 
     "get_partial_freeze_config",
@@ -36,21 +36,21 @@ __all__ = [
     "get_progressive_training_configs",
     "ConfigManager",
     
-    # 工具函数
+    # Utility functions
     "apply_partial_sharing",
     "freeze_encoder_layers",
     "freeze_embedding_layers", 
     "get_hidden_size",
     "unfreeze_encoder_layers",
     
-    # 模型组件
+    # Model components
     "MS2BioText",
     "ProjectionHead",
     "MS2Encoder", 
     "TextEncoder",
     "MSBERT",
     
-    # 辅助函数
+    # Helper functions
     "create_clip_config_example",
     "create_mlm_inputs",
 ]

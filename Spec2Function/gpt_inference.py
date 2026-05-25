@@ -55,7 +55,7 @@ class GPTInference:
         Generate a functional theme name for a cluster (KEGG-style).
         """
             
-        # ========== 从retrieved_texts中提取生物学相关信息 ==========
+        # ========== Extract biology-related info from retrieved_texts ==========
         disease_mentions = []
         pathway_mentions = []
         function_mentions = []
@@ -64,20 +64,20 @@ class GPTInference:
         for hit in retrieved_texts[:8]:
             for text in hit.get('texts', [])[:3]:
                 text_lower = text.lower()
-                # 提取疾病关联
+                # Extract disease associations
                 if 'associated with' in text_lower or 'disease' in text_lower:
                     disease_mentions.append(text)
-                # 提取pathway/process关键词
+                # Extract pathway/process keywords
                 if any(kw in text_lower for kw in ['pathway', 'metabolism', 'biosynthesis', 'degradation', 'cycle', 'signaling']):
                     pathway_mentions.append(text)
-                # 提取功能描述
+                # Extract function descriptions
                 if any(kw in text_lower for kw in ['function', 'role', 'involved in', 'participates']):
                     function_mentions.append(text)
-                # 提取生物样本信息
+                # Extract biospecimen info
                 if any(kw in text_lower for kw in ['blood', 'urine', 'liver', 'brain', 'tissue', 'biospecimen']):
                     biospecimen_mentions.append(text)
-        
-        # ========== 构建prompt ==========
+
+        # ========== Build the prompt ==========
         prompt = f"""You are a metabolic pathway expert. Your task is to name a metabolite cluster using KEGG-style pathway nomenclature.
 
 **Experimental Context:**
@@ -87,7 +87,7 @@ class GPTInference:
 - {cluster_stats['known_count']} annotated + {cluster_stats['unknown_count']} unannotated MS2 features
 """
         
-        # ========== 高权重：已知化合物 ==========
+        # ========== High weight: known compounds ==========
         if top_metabolites and len(top_metabolites) > 0:
             known_names = [t[0] for t in top_metabolites[:5]]
             prompt += f"""
@@ -96,12 +96,12 @@ class GPTInference:
 ↑ These are structurally identified compounds. Base your pathway name primarily on these.
 """
         
-        # ========== 低权重：检索到的功能相似代谢物 ==========
+        # ========== Low weight: retrieved functionally similar metabolites ==========
         prompt += """
 **INFERRED EVIDENCE (LOWER CONFIDENCE - USE AS SUPPORTING INFO ONLY):**
 """
         
-        # 添加提取的生物学信息
+        # Add extracted biology info
         if disease_mentions:
             prompt += f"\n[Disease associations]: {' | '.join(disease_mentions[:3])[:300]}"
         if pathway_mentions:
@@ -109,7 +109,7 @@ class GPTInference:
         if function_mentions:
             prompt += f"\n[Functional roles]: {' | '.join(function_mentions[:3])[:300]}"
         
-        # 添加原始retrieved texts作为补充
+        # Add raw retrieved texts as supplementary context
         if retrieved_texts:
             all_texts = []
             for hit in retrieved_texts[:6]:
@@ -183,8 +183,8 @@ class GPTInference:
                     {"role": "system", "content": "You are a KEGG pathway database curator. Name metabolite clusters using standard pathway nomenclature."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=30,  # 减少token数，强制简洁
-                temperature=0.2  # 降低temperature，更确定性
+                max_tokens=30,  # reduce token count to force conciseness
+                temperature=0.2  # lower temperature for more deterministic output
             )
             theme_name = theme_name.strip('"\'').strip()
             if return_prompt:
@@ -600,7 +600,7 @@ Format as structured text. Be comprehensive but concise.
                     'cluster_id': cr['id'],
                     'metabolites': mets[:5] if mets else ['Unknown']
                 })
-                # 获取该cluster的retrieved_texts
+                # Get retrieved_texts for this cluster
                 if cluster_retrieved_texts_map and cr['id'] in cluster_retrieved_texts_map:
                     cluster_texts.append(cluster_retrieved_texts_map[cr['id']])
                 else:
@@ -651,17 +651,17 @@ Format as structured text. Be comprehensive but concise.
             mets_str = ', '.join(cm['metabolites'][:5]) if cm['metabolites'] else 'Unknown'
             prompt += f"\nCluster {cm['cluster_id']}: {mets_str}"
             
-            # 如果有retrieved_texts，提取关键生物学信息
+            # If retrieved_texts is present, extract key biology info
             if cluster_retrieved_texts and i < len(cluster_retrieved_texts):
                 texts = cluster_retrieved_texts[i]
                 if texts:
-                    # 提取疾病、组织、pathway关键词
+                    # Extract keywords for disease/tissue/pathway
                     bio_hints = []
                     for hit in texts[:3]:
                         for t in hit.get('texts', [])[:2]:
                             t_lower = t.lower()
                             if 'associated with' in t_lower:
-                                # 提取疾病名
+                                # Extract disease name
                                 bio_hints.append(t.split('associated with')[-1][:50].strip())
                             if any(kw in t_lower for kw in ['blood', 'liver', 'brain', 'urine', 'feces']):
                                 bio_hints.append(t[:50])
@@ -720,9 +720,9 @@ Format as structured text. Be comprehensive but concise.
                     try:
                         cluster_id = int(''.join(filter(str.isdigit, parts[0])))
                         suffix = parts[1].strip().strip('"\'')
-                        # 清理suffix，确保简洁
-                        suffix = suffix.split('.')[0].strip()  # 移除句号后的内容
-                        if len(suffix) > 25:  # 太长则截断
+                        # Clean the suffix to keep it concise
+                        suffix = suffix.split('.')[0].strip()  # strip anything after the first period
+                        if len(suffix) > 25:  # truncate if too long
                             suffix = suffix[:25].rsplit(' ', 1)[0]
                         suffix_map[cluster_id] = suffix
                     except:

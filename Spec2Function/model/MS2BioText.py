@@ -32,14 +32,14 @@ class ProjectionHead(nn.Module):
 
 
 class MS2Encoder(nn.Module):
-    """MS2谱图编码器（weighted-mean 池化）"""
+    """MS2 spectrum encoder (weighted-mean pooling)."""
 
     def __init__(self, ms_bert, args):
         super().__init__()
         self.ms_bert = ms_bert
         self.hidden_size = get_hidden_size(ms_bert, args.ms_hidden_size)
 
-        # 冻结参数
+        # Freeze parameters
         if getattr(args, 'freeze_ms_embedding', False):
             freeze_embedding_layers(self.ms_bert)
         if getattr(args, 'freeze_ms_encoder', False):
@@ -57,10 +57,10 @@ class MS2Encoder(nn.Module):
         print(f"✅ MS2 Simple projection: {self.hidden_size} -> {embedding_dim}")
 
     def forward(self, ms_input_id, ms_intensity, ms_attention_mask=None):
-        # predict已经返回pooled结果了
+        # predict already returns the pooled result
         pooled = self.ms_bert.predict(ms_input_id, ms_intensity)  # [B, H]
-        
-        # 直接project
+
+        # Project directly
         projected = self.projection_head(pooled)
         normalized = F.normalize(projected, p=2, dim=-1)
         return normalized, pooled
@@ -74,14 +74,14 @@ class TextEncoder(nn.Module):
         self.text_bert = text_bert
         self.hidden_size = get_hidden_size(text_bert, args.text_hidden_size)
         
-        # 冻结参数
+        # Freeze parameters
         if hasattr(args, 'freeze_text_embedding') and args.freeze_text_embedding:
             freeze_embedding_layers(self.text_bert)
-        
+
         if hasattr(args, 'freeze_text_encoder') and args.freeze_text_encoder:
             freeze_encoder_layers(self.text_bert, args.freeze_text_encoder)
-        
-        # 池化策略
+
+        # Pooling strategy
         self.pooling_strategy = getattr(args, 'text_pooling', 'cls')
         
         # === FIXED: Simple projection head ===
@@ -96,13 +96,13 @@ class TextEncoder(nn.Module):
         print(f"✅ Simple projection head: {self.hidden_size} -> {embedding_dim}")
     
     def forward(self, text_input_id, text_attention_mask):
-        # 获取BERT输出
+        # Get BERT output
         text_outputs = self.text_bert(
-            text_input_id, 
+            text_input_id,
             attention_mask=text_attention_mask
         )
-        
-        # 池化
+
+        # Pooling
         if self.pooling_strategy == 'cls':
             text_embeds = text_outputs.last_hidden_state[:, 0, :]
         elif self.pooling_strategy == 'mean':
@@ -114,11 +114,11 @@ class TextEncoder(nn.Module):
         else:
             raise ValueError(f"Unsupported pooling: {self.pooling_strategy}")
         
-        # 简单投影
+        # Simple projection
         projected_embeds = self.projection_head(text_embeds)
 
 
-        # L2归一化
+        # L2 normalization
         normalized_embeds = F.normalize(projected_embeds, p=2, dim=-1)
         
         return normalized_embeds, projected_embeds
@@ -179,174 +179,174 @@ class MS2BioText(nn.Module):
             p.requires_grad = False
 
     def compute_distillation_loss(self, text_input_ids, text_attention_mask):
-        # teacher：冻结的拷贝，走同样 forward 路径（pool+投影+L2 都包含）
+        # teacher: frozen copy, takes the same forward path (pool + projection + L2)
         with torch.no_grad():
             base_embeds, _ = self.text_encoder_base(
                 text_input_id=text_input_ids,
                 text_attention_mask=text_attention_mask
-            )  # [B, D], 已是 L2 归一
+            )  # [B, D], already L2-normalized
 
-        # student：可训练分支
+        # student: trainable branch
         cur_embeds, _ = self.text_encoder(
             text_input_id=text_input_ids,
             text_attention_mask=text_attention_mask
-        )  # [B, D], 已是 L2 归一
+        )  # [B, D], already L2-normalized
 
         # 1 - cos
         distill_loss = 1.0 - (cur_embeds * base_embeds).sum(dim=-1).mean()
         return distill_loss
 
 
-    def forward(self, ms_input_id, ms_intensity, text_input_id, text_attention_mask, 
+    def forward(self, ms_input_id, ms_intensity, text_input_id, text_attention_mask,
                 masked_text_input_id=None, mlm_labels=None, ms2_labels=None,
                 hard_neg_input_ids=None, hard_neg_attention_mask=None):
         """
-        前向传播
-        :return: MS2嵌入, GT文本嵌入, 相似度矩阵, MLM损失（可选）, MS2预测损失（可选）
+        Forward pass.
+        :return: MS2 embedding, GT text embedding, similarity matrix, MLM loss (optional), MS2 prediction loss (optional)
         """
-        # 获取标准化嵌入
+        # Get normalized embeddings
         ms_embeds, ms_embeds_raw = self.ms_encoder(ms_input_id, ms_intensity)  # [batch_size, embedding_dim]
         text_embeds, text_hiddenstate = self.text_encoder(text_input_id, text_attention_mask)  # [batch_size, embedding_dim]
         if ms_embeds.dim() == 3 and ms_embeds.size(1) == 1:
             ms_embeds = ms_embeds.squeeze(1)
-        # 如果有硬负样本，一起编码
+        # Encode hard negatives together if provided
         if hard_neg_input_ids is not None and hard_neg_attention_mask is not None:
             hard_neg_embeds, _ = self.text_encoder(hard_neg_input_ids, hard_neg_attention_mask)
-            # 拼接GT和硬负样本
+            # Concatenate GT and hard negatives
             all_text_embeds = torch.cat([text_embeds, hard_neg_embeds], dim=0)
             similarity_matrix = self.compute_similarity(ms_embeds, all_text_embeds)
         else:
-            # 计算相似度矩阵
+            # Compute similarity matrix
             similarity_matrix = self.compute_similarity(ms_embeds, text_embeds)
-        
-        # MLM损失（如果启用且提供了掩码输入）
+
+        # MLM loss (if enabled and masked inputs are provided)
         mlm_loss = None
         if self.use_mlm and masked_text_input_id is not None and mlm_labels is not None:
             _, mlm_hiddenstate = self.text_encoder(masked_text_input_id, text_attention_mask)
             mlm_loss = self.compute_mlm_loss(mlm_hiddenstate, mlm_labels)
-        
-        # MS2预测损失
+
+        # MS2 prediction loss
         ms2_prediction_loss = None
         if self.use_ms2_prediction:
             ms2_prediction_loss = self.compute_ms2_prediction_loss(
                 ms_embeds_raw, ms2_labels
             )
-        
-        # 返回ms_embeds和text_embeds（GT的），用于监控collapse
+
+        # Return ms_embeds and (GT) text_embeds for collapse monitoring
         return ms_embeds, text_embeds, similarity_matrix, mlm_loss, ms2_prediction_loss
-    
+
     def compute_similarity(self, ms_embeds, text_embeds):
         """
-        计算MS2和文本嵌入之间的相似度矩阵
-        :param ms_embeds: MS2嵌入 [batch_size, embedding_dim]
-        :param text_embeds: 文本嵌入 [batch_size, embedding_dim]
-        :return: 相似度矩阵 [batch_size, batch_size]
+        Compute the similarity matrix between MS2 and text embeddings.
+        :param ms_embeds: MS2 embeddings [batch_size, embedding_dim]
+        :param text_embeds: text embeddings [batch_size, embedding_dim]
+        :return: similarity matrix [batch_size, batch_size]
         """
-        # 计算余弦相似度并应用温度缩放
+        # Compute cosine similarity with temperature scaling
         similarity_matrix = torch.matmul(ms_embeds, text_embeds.t()) / self.temperature
         return similarity_matrix
-    
+
     def compute_contrastive_loss(self, similarity_matrix, text_overlap_matrix=None):
         """
-        计算对比学习损失，支持多正样本（text overlap）
-        :param similarity_matrix: 相似度矩阵 [batch_size, batch_size]
-        :param text_overlap_matrix: text overlap矩阵 [batch_size, batch_size], 1表示有共享text
-        :return: 对比学习损失
+        Compute the contrastive loss, with optional multi-positive support (text overlap).
+        :param similarity_matrix: similarity matrix [batch_size, batch_size]
+        :param text_overlap_matrix: text overlap matrix [batch_size, batch_size]; 1 means shared text
+        :return: contrastive loss
         """
-        # 移除多余的维度
+        # Remove extra dimensions
         if similarity_matrix.dim() == 3:
             similarity_matrix = similarity_matrix.squeeze(1)
-        
+
         batch_size = similarity_matrix.size(0)
-        
-        # === 如果没有提供overlap矩阵，使用传统的单正样本loss ===
+
+        # === If no overlap matrix is provided, use the standard single-positive loss ===
         if text_overlap_matrix is None:
             labels = torch.arange(batch_size, device=similarity_matrix.device)
             ms_to_text_loss = F.cross_entropy(similarity_matrix, labels)
-            
+
             if self.symmetric_loss:
                 text_to_ms_loss = F.cross_entropy(similarity_matrix.t(), labels)
                 total_loss = (ms_to_text_loss + text_to_ms_loss) / 2
             else:
                 total_loss = ms_to_text_loss
-            
+
             return total_loss
-        
-        # === 使用text overlap矩阵的多正样本loss ===
+
+        # === Use the multi-positive loss with the text overlap matrix ===
         text_overlap_matrix = text_overlap_matrix.to(similarity_matrix.device)
         eye_matrix = torch.eye(batch_size, device=similarity_matrix.device)
         positive_mask = torch.clamp(text_overlap_matrix + eye_matrix, 0, 1)
-        # 计算MS2到文本的loss
+        # Compute MS2-to-text loss
         ms_to_text_loss = self._compute_multi_positive_loss(
-            similarity_matrix, 
+            similarity_matrix,
             text_overlap_matrix
         )
-        
+
         if self.symmetric_loss:
-            # 计算文本到MS2的loss（转置）
+            # Compute text-to-MS2 loss (transpose)
             text_to_ms_loss = self._compute_multi_positive_loss(
-                similarity_matrix.t(), 
+                similarity_matrix.t(),
                 text_overlap_matrix.t()
             )
             total_loss = (ms_to_text_loss + text_to_ms_loss) / 2
         else:
             total_loss = ms_to_text_loss
-        
+
         return total_loss
-    
+
 
     def _compute_multi_positive_loss(self, similarity_matrix, positive_mask):
         """
-        计算支持多正样本的对比学习loss (修复版)
-        :param similarity_matrix: [batch_size, batch_size] - 已经除以temperature
-        :param positive_mask: [batch_size, batch_size], 1表示正样本
+        Compute a multi-positive contrastive loss (fixed version).
+        :param similarity_matrix: [batch_size, batch_size] - already divided by temperature
+        :param positive_mask: [batch_size, batch_size], 1 marks positives
         """
         batch_size = similarity_matrix.size(0)
-        
-        # 使用log-sum-exp技巧，数值更稳定
+
+        # Use the log-sum-exp trick for numerical stability
         max_sim = similarity_matrix.max(dim=1, keepdim=True)[0].detach()
-        
-        # 分子：log(sum(exp(正样本)))
+
+        # Numerator: log(sum(exp(positives)))
         exp_pos = torch.exp(similarity_matrix - max_sim) * positive_mask
         pos_sum = exp_pos.sum(dim=1)
         log_pos_sum = torch.log(pos_sum + 1e-8) + max_sim.squeeze(1)
-        
-        # 分母：log(sum(exp(所有样本))) ← 关键修复！
+
+        # Denominator: log(sum(exp(all samples)))  <-- the key fix!
         exp_all = torch.exp(similarity_matrix - max_sim)
-        all_sum = exp_all.sum(dim=1)  # ← 不需要mask，包含所有样本！
+        all_sum = exp_all.sum(dim=1)  # <-- no mask: include all samples!
         log_all_sum = torch.log(all_sum + 1e-8) + max_sim.squeeze(1)
-        
+
         # Loss = -(log(pos) - log(all))
         loss = -(log_pos_sum - log_all_sum)
-        
+
         return loss.mean()
-    
+
     def compute_mlm_loss(self, text_hiddenstate, mlm_labels):
         """
-        计算MLM（Masked Language Modeling）损失
-        :param masked_text_input_id: 掩码文本输入ID
-        :param text_attention_mask: 文本注意力掩码
-        :param mlm_labels: MLM标签，-100表示不计算损失的位置
-        :return: MLM损失
+        Compute the MLM (Masked Language Modeling) loss.
+        :param masked_text_input_id: masked text input IDs
+        :param text_attention_mask: text attention mask
+        :param mlm_labels: MLM labels; -100 marks positions excluded from the loss
+        :return: MLM loss
         """
-        
-        # 通过MLM头预测词汇
+
+        # Predict vocabulary via the MLM head
         mlm_logits = self.mlm_head(text_hiddenstate.last_hidden_state)  # [batch_size, seq_len, vocab_size]
-        
-        # 计算MLM损失
+
+        # Compute MLM loss
         mlm_loss = F.cross_entropy(
             mlm_logits.view(-1, mlm_logits.size(-1)),
             mlm_labels.view(-1),
             ignore_index=-100
         )
-        
+
         return mlm_loss
-    
+
     def compute_ms2_prediction_loss(self,ms_embeds_raw, labels):
         """
-        计算MS2预测任务损失
-        :param ms_embeds: MS2嵌入
-        :return: MS2预测损失
+        Compute the MS2 prediction task loss.
+        :param ms_embeds: MS2 embeddings
+        :return: MS2 prediction loss
         """
 
         if len(ms_embeds_raw.shape) == 3:
@@ -354,149 +354,149 @@ class MS2BioText(nn.Module):
 
         if self.ms2_prediction_head is None:
             return None
-        
-        # 通过分类头得到logits
+
+        # Get logits via the classification head
         logits = self.ms2_prediction_head(ms_embeds_raw) # [batch_size, num_ms2_classes]
-        
-        # 计算交叉熵损失
+
+        # Compute cross-entropy loss
         loss = F.binary_cross_entropy_with_logits(logits, labels.float())
-        
+
         return loss
-    
+
     def get_ms_embeddings(self, ms_input_id, ms_intensity):
         """
-        获取MS2嵌入
-        :param ms_input_id: MS2输入ID
-        :param ms_intensity: MS2强度
-        :return: MS2嵌入
+        Get MS2 embeddings.
+        :param ms_input_id: MS2 input IDs
+        :param ms_intensity: MS2 intensities
+        :return: MS2 embeddings
         """
         return self.ms_encoder(ms_input_id, ms_intensity)
-    
+
     def get_text_embeddings(self, text_input_id, text_attention_mask):
         """
-        获取文本嵌入
-        :param text_input_id: 文本输入ID
-        :param text_attention_mask: 文本注意力掩码
-        :return: 文本嵌入
+        Get text embeddings.
+        :param text_input_id: text input IDs
+        :param text_attention_mask: text attention mask
+        :return: text embeddings
         """
         text_embeddings , _ =self.text_encoder(text_input_id, text_attention_mask)
         return text_embeddings
-    
+
     def encode_ms(self, ms_input_id, ms_intensity):
         """
-        编码MS2谱图（推理时使用）
-        :param ms_input_id: MS2输入ID
-        :param ms_intensity: MS2强度
-        :return: MS2嵌入
+        Encode an MS2 spectrum (used at inference time).
+        :param ms_input_id: MS2 input IDs
+        :param ms_intensity: MS2 intensities
+        :return: MS2 embeddings
         """
         with torch.no_grad():
             return self.get_ms_embeddings(ms_input_id, ms_intensity)
-    
+
     def encode_text(self, text_input_id, text_attention_mask):
         """
-        编码文本（推理时使用）
-        :param text_input_id: 文本输入ID
-        :param text_attention_mask: 文本注意力掩码
-        :return: 文本嵌入
+        Encode text (used at inference time).
+        :param text_input_id: text input IDs
+        :param text_attention_mask: text attention mask
+        :return: text embeddings
         """
         with torch.no_grad():
             return self.get_text_embeddings(text_input_id, text_attention_mask)
-    
+
     def compute_similarity_scores(self, ms_embeds, text_embeds):
         """
-        计算相似度分数（推理时使用）
-        :param ms_embeds: MS2嵌入 [N, embedding_dim]
-        :param text_embeds: 文本嵌入 [M, embedding_dim]
-        :return: 相似度分数 [N, M]
+        Compute similarity scores (used at inference time).
+        :param ms_embeds: MS2 embeddings [N, embedding_dim]
+        :param text_embeds: text embeddings [M, embedding_dim]
+        :return: similarity scores [N, M]
         """
         with torch.no_grad():
-            # 直接计算余弦相似度，不应用温度缩放
+            # Compute cosine similarity directly, without temperature scaling
             similarity_scores = torch.matmul(ms_embeds, text_embeds.t())
             return similarity_scores
-    
+
     def unfreeze_model(self, unfreeze_ratio):
         """
-        解冻模型参数
-        :param unfreeze_ratio: 解冻比例 (0~1之间)
+        Unfreeze model parameters.
+        :param unfreeze_ratio: unfreezing ratio (between 0 and 1)
         """
-        # 解冻MS2编码器
+        # Unfreeze MS2 encoder
         unfreeze_encoder_layers(self.ms_encoder.ms_bert, unfreeze_ratio)
-        
-        # 解冻文本编码器
+
+        # Unfreeze text encoder
         unfreeze_encoder_layers(self.text_encoder.text_bert, unfreeze_ratio)
-    
+
     def freeze_encoders(self):
-        """冻结预训练编码器，只训练投影头"""
-        # 冻结MS2编码器
+        """Freeze pretrained encoders and only train projection heads."""
+        # Freeze MS2 encoder
         for param in self.ms_encoder.ms_bert.parameters():
             param.requires_grad = False
-        
-        # 冻结文本编码器
+
+        # Freeze text encoder
         for param in self.text_encoder.text_bert.parameters():
             param.requires_grad = False
-    
+
     def unfreeze_encoders(self):
-        """解冻预训练编码器"""
-        # 解冻MS2编码器
+        """Unfreeze pretrained encoders."""
+        # Unfreeze MS2 encoder
         for param in self.ms_encoder.ms_bert.parameters():
             param.requires_grad = True
-        
-        # 解冻文本编码器
+
+        # Unfreeze text encoder
         for param in self.text_encoder.text_bert.parameters():
             param.requires_grad = True
 
 
-# 辅助函数：创建配置示例
+# Helper: create a configuration example
 def create_clip_config_example():
-    """创建CLIP模型配置示例"""
+    """Create an example CLIP model configuration."""
     class CLIPConfig:
         def __init__(self):
-            # 基础配置
+            # Base configuration
             self.ms_hidden_size = 768
             self.text_hidden_size = 768
             self.embedding_dim = 512
-            
-            # 投影头配置
+
+            # Projection head
             self.projection_dropout = 0.1
-            
-            # 文本池化策略
+
+            # Text pooling strategy
             self.text_pooling = 'cls'  # 'cls', 'mean', 'max'
-            
-            # 对比学习配置
+
+            # Contrastive learning
             self.temperature = 0.07
             self.learnable_temperature = True
             self.symmetric_loss = True
-            
-            # MLM配置
+
+            # MLM
             self.use_mlm = True
             self.mlm_loss_weight = 0.1
-            
-            # MS2预测任务配置
+
+            # MS2 prediction
             self.use_ms2_prediction = False
             self.ms2_prediction_loss_weight = 0.1
-            
-            # 冻结配置
+
+            # Freezing
             self.freeze_ms_embedding = False
-            self.freeze_ms_encoder = 0  # 冻结前N层，0表示不冻结
+            self.freeze_ms_encoder = 0  # freeze first N layers; 0 means no freezing
             self.freeze_text_embedding = False
             self.freeze_text_encoder = 0
-    
+
     return CLIPConfig()
 
 
-# 辅助函数：创建掩码文本输入
+# Helper: create masked text input
 def create_mlm_inputs(text_input_ids, tokenizer, mask_prob=0.15):
     """
-    创建MLM训练输入
-    :param text_input_ids: 原始文本输入ID
-    :param tokenizer: 分词器
-    :param mask_prob: 掩码概率
-    :return: 掩码后的输入ID和标签
+    Create MLM training inputs.
+    :param text_input_ids: original text input IDs
+    :param tokenizer: tokenizer
+    :param mask_prob: mask probability
+    :return: masked input IDs and labels
     """
     input_ids = text_input_ids.clone()
     labels = text_input_ids.clone()
-    
-    # 创建随机掩码（忽略特殊token）
+
+    # Create the random mask (skip special tokens)
     probability_matrix = torch.full(labels.shape, mask_prob)
     special_tokens_mask = [
         tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True)
@@ -504,19 +504,19 @@ def create_mlm_inputs(text_input_ids, tokenizer, mask_prob=0.15):
     ]
     special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
     probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-    
+
     masked_indices = torch.bernoulli(probability_matrix).bool()
-    labels[~masked_indices] = -100  # 不计算损失的位置
-    
-    # 80%的时候用[MASK]替换
+    labels[~masked_indices] = -100  # positions excluded from the loss
+
+    # 80% of the time: replace with [MASK]
     indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
     input_ids[indices_replaced] = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-    
-    # 10%的时候用随机token替换
+
+    # 10% of the time: replace with a random token
     indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
     random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
     input_ids[indices_random] = random_words[indices_random]
-    
-    # 剩余10%保持不变
-    
+
+    # Remaining 10%: leave unchanged
+
     return input_ids, labels

@@ -277,7 +277,7 @@ class Spec2FunctionManager:
         if not hasattr(self, "femdb_embeddings") or self.femdb_embeddings is None or len(self.femdb_embeddings) == 0:
             return []
 
-        # 使用 config 中的默认值
+        # Use defaults from config
         if top_k is None:
             top_k = getattr(self.config, 'single_retrieval_top_k', 10)
         if min_similarity is None:
@@ -484,7 +484,7 @@ class Spec2FunctionManager:
                                             top_k: int = None,
                                             min_similarity: float = None) -> List[Dict]:
         """
-        从 centroid 检索功能文本
+        Retrieve functional texts from a centroid.
         """
         if centroid.dim() == 1:
             centroid = centroid.unsqueeze(0)
@@ -492,7 +492,7 @@ class Spec2FunctionManager:
         if not hasattr(self, "femdb_embeddings") or self.femdb_embeddings is None or len(self.femdb_embeddings) == 0:
             return []
         
-        # 使用 config 中的默认值
+        # Use defaults from config
         if top_k is None:
             top_k = getattr(self.config, 'set_retrieval_top_k', 5)
         if min_similarity is None:
@@ -505,7 +505,7 @@ class Spec2FunctionManager:
         if sims.dim() == 2:
             sims = sims.squeeze(0)
         
-        top_sims, top_idxs = torch.topk(sims, k=min(top_k * 3, len(sims)))  # 多取一些备用
+        top_sims, top_idxs = torch.topk(sims, k=min(top_k * 3, len(sims)))  # grab extras as buffer
         
         print(f"       ✓ Retrieved {len(top_idxs)} raw fragments from FemDB")
         
@@ -514,7 +514,7 @@ class Spec2FunctionManager:
         hits = {}
         
         for s, idx in zip(top_sims.numpy(), top_idxs.numpy()):
-            # min_similarity 过滤
+            # filter by min_similarity
             if s < min_similarity:
                 filtered_count += 1
                 continue
@@ -549,7 +549,8 @@ class Spec2FunctionManager:
                                           final_top_k: int = 5,
                                           min_similarity: float = None) -> List[Dict]:
         """
-        对cluster内每个MS2都检索top_k，然后统计频数，返回排名最高的final_top_k个
+        For each MS2 in the cluster, retrieve top_k, then aggregate by frequency
+        and return the highest-ranked final_top_k.
         """
         if embeddings.dim() == 1:
             embeddings = embeddings.unsqueeze(0)
@@ -566,10 +567,10 @@ class Spec2FunctionManager:
         embeddings_norm = F.normalize(embeddings, dim=1)
         db_norm = F.normalize(db_embeddings, dim=1)
         
-        # 计算所有sample和所有db的相似度矩阵 [n_samples, n_db]
+        # Compute similarity matrix between all samples and all db entries [n_samples, n_db]
         all_sims = torch.mm(embeddings_norm, db_norm.t())
         
-        # 统计每个metabolite被检索到的频数和最高相似度
+        # Count retrieval frequency and track max similarity per metabolite
         metabolite_votes = defaultdict(lambda: {'count': 0, 'max_sim': 0.0, 'texts': []})
         
         for sample_idx in range(all_sims.shape[0]):
@@ -593,14 +594,14 @@ class Spec2FunctionManager:
                     metabolite_votes[name]['count'] += 1
                     metabolite_votes[name]['max_sim'] = max(metabolite_votes[name]['max_sim'], float(sim_val))
                     
-                    # 收集文本
+                    # Collect texts
                     text = frag.get('text', '')
                     if text and len(metabolite_votes[name]['texts']) < 2:
                         metabolite_votes[name]['texts'].append(text)
                     
                     count_for_sample += 1
         
-        # 按频数排序，频数相同则按最高相似度排序
+        # Sort by frequency; break ties by max similarity
         sorted_metabolites = sorted(
             metabolite_votes.items(),
             key=lambda x: (x[1]['count'], x[1]['max_sim']),
@@ -609,7 +610,7 @@ class Spec2FunctionManager:
         
         print(f"       ✓ Found {len(sorted_metabolites)} unique metabolites across all samples")
         
-        # 构建返回结果
+        # Build the result
         results = []
         for name, info in sorted_metabolites[:final_top_k]:
             results.append({
@@ -852,7 +853,7 @@ class Spec2FunctionManager:
                         cluster_embeddings = torch.tensor(embeds[cluster_positions])
                     
                     if retrieval_method == 'voting' and cluster_embeddings is not None and len(cluster_embeddings) > 0:
-                        # Voting-based retrieval: 每个MS2都检索，然后统计频数
+                        # Voting-based retrieval: retrieve for each MS2, then aggregate by frequency
                         try:
                             print(f"\n   Retrieving functional texts using VOTING method...")
                             text_hits = self.retrieve_function_texts_by_voting(
@@ -1033,10 +1034,10 @@ class Spec2FunctionManager:
                     
             print(f"OK Generated {len(cluster_reports)} cluster reports")
             
-            # 原代码：
+            # Original code:
             cluster_reports.sort(key=lambda x: abs(x['avg_logfc']), reverse=True)
 
-            # 【新增】后处理：去重复theme name
+            # [Added] post-processing: deduplicate theme names
             if self.gpt:
                 print("\n Disambiguating duplicate theme names...")
                 cluster_reports = self.gpt.disambiguate_duplicate_themes(cluster_reports)
