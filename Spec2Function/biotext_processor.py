@@ -8,90 +8,90 @@ from abc import ABC, abstractmethod
 
 class BioTextProcessor(ABC):
     """
-    Abstract base class for biological-text processors.
-    Defines a unified interface for processing biological text data.
+    生物文本处理器的抽象基类
+    定义了处理生物文本数据的统一接口
     """
-
+    
     def __init__(self, fields_to_keep: Union[List[str], str] = "all"):
         """
-        Initialize the processor.
-
-        Args:
-            fields_to_keep: data fields to keep; either "all" or a list of field names
+        初始化处理器
+        
+        参数:
+            fields_to_keep: 需要保留的数据字段，可以是"all"或字段名列表
         """
         self.fields_to_keep = fields_to_keep
-
+    
     @abstractmethod
     def process(self, biotext_data: Dict, meta_data: Optional[pd.DataFrame] = None) -> Dict:
         """
-        Abstract method to process biological text data; must be implemented by subclasses.
-
-        Args:
-            biotext_data: raw biological text data {molecule_id: text_str}
-            meta_data: metadata DataFrame
-
-        Returns:
-            processed data {molecule_id: processed_str}
+        处理生物文本数据的抽象方法，子类必须实现
+        
+        参数:
+            biotext_data: 原始的生物文本数据 {molecule_id: text_str}
+            meta_data: 元数据DataFrame
+            
+        返回:
+            处理后的数据 {molecule_id: processed_str}
         """
         pass
-
+    
     def __call__(self, biotext_data: Dict, meta_data: Optional[pd.DataFrame] = None) -> Dict:
         """
-        Make the processor callable like a function.
-
-        Args:
-            biotext_data: raw biological text data
-            meta_data: metadata DataFrame
-
-        Returns:
-            processed data
+        使处理器对象可以像函数一样被调用
+        
+        参数:
+            biotext_data: 原始的生物文本数据
+            meta_data: 元数据DataFrame
+            
+        返回:
+            处理后的数据
         """
         return self.process(biotext_data, meta_data)
 
 class HMDBProcessor(BioTextProcessor):
-    """HMDB dataset processor implementation; supports dict and string output formats."""
-
-    def __init__(self, fields_to_keep: Union[List[str], str] = "all",
+    """HMDB数据集的处理器实现，支持字典和字符串输出格式"""
+    
+    def __init__(self, fields_to_keep: Union[List[str], str] = "all", 
                 return_type: str = "dict",
                 max_synonyms: int = 5,
                 delimiter: str = "; "):
         """
-        Initialize the HMDB processor.
-
-        Args:
-            fields_to_keep: data fields to keep; either "all" or a list of field names
-            return_type: return type - "dict" returns a dict; "str" returns a string
-            max_synonyms: maximum number of synonyms to keep
-            delimiter: delimiter used to replace the "{}" separator in the raw data
+        初始化HMDB处理器
+        
+        参数:
+            fields_to_keep: 需要保留的数据字段，可以是"all"或字段名列表
+            return_type: 返回类型 - "dict"返回字典结构，"str"返回字符串结构
+            max_synonyms: 最多保留的同义词数量
+            delimiter: 用于替换原始数据中"{}"分隔符的新分隔符
         """
         super().__init__(fields_to_keep)
-        # All possible fields
+        # 定义所有可能的字段
         self.all_fields = [
-            "molecular_function",
-            "enzymes_proteins_pathways",
-            "toxicity_or_benefit",
-            "disease_association",
-            "distribution",
-            "smiles_synonyms",
+            "molecular_function", 
+            "enzymes_proteins_pathways", 
+            "toxicity_or_benefit", 
+            "disease_association", 
+            "distribution", 
+            "smiles_synonyms", 
             "kingdom"
         ]
-
-        # Decide which fields to keep
+        
+        # 决定要保留哪些字段
         if self.fields_to_keep == "all":
             self.fields_to_keep = self.all_fields
-
-        # Set return type
+            
+        # 设置返回类型
         if return_type not in ["dict", "str"]:
-            raise ValueError("return_type must be 'dict' or 'str'")
+            raise ValueError("return_type必须是'dict'或'str'")
         self.return_type = return_type
-
-        # Max number of synonyms
+        
+        # 设置最大同义词数量
         self.max_synonyms = max_synonyms
-
-        # Delimiter
+        
+        # 设置分隔符
         self.delimiter = delimiter
-
-        # Default sentence templates for missing data
+        
+        # 定义缺失数据的默认句子模板
         self.default_sentences = {
             "molecular_function": "No known molecular function or biological role has been reported.",
             "enzymes_proteins_pathways": "No specific enzymes, proteins or pathways associated with this compound have been documented.",
@@ -104,118 +104,118 @@ class HMDBProcessor(BioTextProcessor):
     
     def process(self, biotext_data: Dict, meta_data) -> Dict:
         """
-        Process biological text data from the HMDB dataset.
-
-        Args:
-            biotext_data: raw biological text data {molecule_id: text_str}
-            meta_data: metadata DataFrame containing fields like synonyms and kingdom
-
-        Returns:
-            Processed data; format depends on return_type:
-            - dict mode: {molecule_id: processed_dict}
-            - str mode: {molecule_id: processed_str}
+        处理HMDB数据集的生物文本数据
+        
+        参数:
+            biotext_data: 原始的生物文本数据 {molecule_id: text_str}
+            meta_data: 元数据DataFrame，包含synonyms和kingdom等信息 
+            
+        返回:
+            处理后的数据，根据return_type设置返回:
+            - dict模式: {molecule_id: processed_dict}
+            - str模式: {molecule_id: processed_str}
         """
         processed_data = {}
-
-        # Process each molecule ID
+        
+        # 处理每个分子ID
         for molecule_id, text_data in biotext_data.items():
-            # Initialize processing result for this molecule
+            # 初始化该分子的处理结果
             processed_dict = {field: None for field in self.all_fields}
-
-            # Extract data from text
+            
+            # 从文本中提取数据
             if isinstance(text_data, str) and text_data.strip():
-                # Parse molecular function
+                # 解析分子功能
                 if "molecular_function" in self.fields_to_keep:
                     molecular_function_match = re.search(
-                        r'=== molecular_function ===\s*{.*?"biological_function_sentence":\s*"(.*?)"\s*}',
+                        r'=== molecular_function ===\s*{.*?"biological_function_sentence":\s*"(.*?)"\s*}', 
                         text_data, re.DOTALL
                     )
                     if molecular_function_match and molecular_function_match.group(1).strip():
                         processed_dict["molecular_function"] = molecular_function_match.group(1).strip()
-
-                # Parse enzymes/proteins/pathways
+                
+                # 解析酶蛋白和路径
                 if "enzymes_proteins_pathways" in self.fields_to_keep:
                     enzymes_match = re.search(
-                        r'=== enzymes_proteins_pathways ===\s*{.*?"enzymes_proteins_pathways_sentence":\s*"(.*?)"\s*}',
+                        r'=== enzymes_proteins_pathways ===\s*{.*?"enzymes_proteins_pathways_sentence":\s*"(.*?)"\s*}', 
                         text_data, re.DOTALL
                     )
                     if enzymes_match and enzymes_match.group(1).strip():
                         processed_dict["enzymes_proteins_pathways"] = enzymes_match.group(1).strip()
-
-                # Parse toxicity and benefit
+                
+                # 解析毒性和益处
                 if "toxicity_or_benefit" in self.fields_to_keep:
                     toxicity_match = re.search(
-                        r'=== toxicity_or_benefit ===\s*{.*?"toxicity_or_benefit_sentence":\s*"(.*?)"\s*}',
+                        r'=== toxicity_or_benefit ===\s*{.*?"toxicity_or_benefit_sentence":\s*"(.*?)"\s*}', 
                         text_data, re.DOTALL
                     )
                     if toxicity_match and toxicity_match.group(1).strip():
                         processed_dict["toxicity_or_benefit"] = toxicity_match.group(1).strip()
-
-                # Parse disease association
+                
+                # 解析疾病关联
                 if "disease_association" in self.fields_to_keep:
                     disease_match = re.search(
-                        r'=== disease_association ===\s*{.*?"disease_association_sentence":\s*"(.*?)"\s*}',
+                        r'=== disease_association ===\s*{.*?"disease_association_sentence":\s*"(.*?)"\s*}', 
                         text_data, re.DOTALL
                     )
                     if disease_match and disease_match.group(1).strip():
                         processed_dict["disease_association"] = disease_match.group(1).strip()
-
-            # Get extra information from metadata
+            
+            # 从元数据中获取额外信息
             if meta_data is not None:
-                # Check whether molecule_id is in the metadata
+                # 检查molecule_id是否在元数据中
                 meta_row = None
                 if 'HMDB.ID' in meta_data.columns and molecule_id in meta_data['HMDB.ID'].values:
                     meta_row = meta_data[meta_data['HMDB.ID'] == molecule_id].iloc[0]
                 elif molecule_id in meta_data.index:
                     meta_row = meta_data.loc[molecule_id]
-
+                
                 if meta_row is not None:
-                    # Process synonyms and SMILES
+                    # 处理同义词和SMILES
                     if "smiles_synonyms" in self.fields_to_keep:
                         synonyms_dict = {
                             'smiles': None,
                             'common_names': []
                         }
-
-                        # Add SMILES structure
+                        
+                        # 添加SMILES结构
                         if 'SMILES.ID' in meta_row and not pd.isna(meta_row['SMILES.ID']):
                             smiles = meta_row['SMILES.ID']
                             if isinstance(smiles, str) and smiles.strip():
                                 synonyms_dict['smiles'] = smiles
-
-                        # Add synonyms
+                        
+                        # 添加同义词
                         if 'Synonyms' in meta_row and not pd.isna(meta_row['Synonyms']):
                             synonyms = meta_row['Synonyms']
                             if isinstance(synonyms, str):
-                                # Replace "{}" with delimiter
+                                # 替换"{}"为delimiter
                                 synonyms_processed = synonyms.replace('{}', self.delimiter)
-                                # Split into list
+                                # 拆分为列表
                                 synonyms_list = synonyms_processed.split(';')
-                                # Filter out empty strings
+                                # 过滤掉空字符串
                                 synonyms_list = [s.strip() for s in synonyms_list if s.strip()]
-                                # Cap the number
+                                # 限制数量
                                 synonyms_dict['common_names'] = synonyms_list[:self.max_synonyms]
                             elif isinstance(synonyms, list):
-                                # Replace "{}" with delimiter
+                                # 替换"{}"为delimiter
                                 synonyms_list = [s.replace('{}', self.delimiter) for s in synonyms if s.strip()]
-                                # Cap the number
+                                # 限制数量
                                 synonyms_dict['common_names'] = synonyms_list[:self.max_synonyms]
-
-                        # Save processing result if there is any valid data
+                        
+                        # 如果有任何有效数据，保存到处理结果
                         if synonyms_dict['smiles'] is not None or synonyms_dict['common_names']:
                             processed_dict["smiles_synonyms"] = synonyms_dict
-
-                    # Process kingdom/taxonomy info
+                    
+                    # 处理kingdom分类信息
                     if "kingdom" in self.fields_to_keep:
                         kingdom_info = {}
                         for category in ['Kingdom', 'Super_class', 'Class', 'Sub_class']:
                             if category in meta_row and not pd.isna(meta_row[category]):
                                 kingdom_info[category.lower()] = meta_row[category]
-
+                        
                         if kingdom_info:
                             processed_dict["kingdom"] = kingdom_info
-
-                    # Process distribution info
+                    
+                    # 处理分布信息
                     if "distribution" in self.fields_to_keep:
                         distribution_info = {}
                         for location_type in ['Biospecimen_locations', 'Cellular_locations', 'Tissue_locations']:
@@ -224,77 +224,77 @@ class HMDBProcessor(BioTextProcessor):
                                 locations = meta_row[location_type]
                                 if isinstance(locations, str):
                                     locations_list = locations.split(';')
-                                    # Replace delimiter
+                                    # 替换分隔符
                                     locations_list = [loc.replace('{}', self.delimiter) for loc in locations_list]
                                     distribution_info[key.lower()] = locations_list
                                 elif isinstance(locations, list):
-                                    # Replace delimiter
+                                    # 替换分隔符
                                     locations_list = [loc.replace('{}', self.delimiter) for loc in locations]
                                     distribution_info[key.lower()] = locations_list
-
+                        
                         if distribution_info:
                             processed_dict["distribution"] = distribution_info
-
-            # Convert to sentence form
+            
+            # 转换为句子形式
             processed_dict = self._convert_to_sentences(processed_dict, molecule_id, meta_data)
-
-            # Handle return type
+            
+            # 根据返回类型进行处理
             if self.return_type == "str":
-                # Convert dict to string
+                # 将字典转换为字符串
                 processed_str = self._dict_to_text(processed_dict)
                 processed_data[molecule_id] = processed_str
             else:
-                # Save the result, keeping only the desired fields
+                # 保存处理结果，只保留需要的字段
                 processed_data[molecule_id] = {k: v for k, v in processed_dict.items() if k in self.fields_to_keep}
-
+        
         return processed_data
     
     def _convert_to_sentences(self, data_dict: Dict, molecule_id: str, meta_data) -> Dict:
         """
-        Convert dict-format data into sentence form.
-
-        Args:
-            data_dict: dict containing extracted data
-            molecule_id: molecule ID, used to generate more specific descriptions
-
-        Returns:
-            dict with sentence-form data
+        将字典格式的数据转换为句子格式
+        
+        参数:
+            data_dict: 包含提取数据的字典
+            molecule_id: 分子ID，用于生成更具体的描述
+            
+        返回:
+            包含句子形式数据的字典
         """
         result_dict = {}
-
+        
         for field in self.all_fields:
             if field not in self.fields_to_keep:
                 continue
-
+                
             value = data_dict.get(field)
-
-            # If the value is None, use the default sentence
+            
+            # 如果值为None，使用默认句子
             if value is None:
                 result_dict[field] = self.default_sentences[field]
                 continue
-
-            # Handle each field type
+                
+            # 根据不同字段类型进行处理
             if field == "smiles_synonyms":
                 if isinstance(value, dict):
                     smiles = value.get('smiles')
                     common_names = value.get('common_names', [])
-
-                    # Build sentence
+                    
+                    # 构建句子
                     sentence_parts = []
-
-                    # Add SMILES info
+                    
+                    # 添加SMILES信息
                     if smiles:
                         sentence_parts.append(f"SMILES structure: {smiles}")
-
-                    # Add synonyms info
+                    
+                    # 添加同义词信息
                     if common_names:
                         if len(common_names) == 1:
                             sentence_parts.append(f"Also known as: {common_names[0]}")
                         else:
                             names_str = self.delimiter.join(common_names)
                             sentence_parts.append(f"Common names include: {names_str}")
-
-                            # If synonyms exceed display limit, add a hint
+                            
+                            # 如果同义词数量超过显示限制，添加提示
                             total_count = len(common_names)
                             if 'Synonyms' in meta_data.columns and molecule_id in meta_data['HMDB.ID'].values:
                                 meta_row = meta_data[meta_data['HMDB.ID'] == molecule_id].iloc[0]
@@ -351,20 +351,20 @@ class HMDBProcessor(BioTextProcessor):
                 else:
                     result_dict[field] = self.default_sentences[field]
             else:
-                # Other fields are already in string form
+                # 其他字段已经是字符串形式
                 result_dict[field] = value
-
+                
         return result_dict
-
+    
     def _dict_to_text(self, data_dict: Dict) -> str:
         """
-        Convert a dict into text form.
-
-        Args:
-            data_dict: dict containing sentence-form data
-
-        Returns:
-            merged text
+        将字典转换为文本形式
+        
+        参数:
+            data_dict: 包含句子形式数据的字典
+            
+        返回:
+            合并后的文本
         """
         text_parts = []
         
@@ -377,4 +377,4 @@ class HMDBProcessor(BioTextProcessor):
 
 class KEGGProcessor(BioTextProcessor):
     def process(self, biotext_data: Dict, meta_data: Optional[pd.DataFrame] = None) -> Dict:
-        raise NotImplementedError("KEGGProcessor.process is not implemented yet")
+        raise NotImplementedError("KEGGProcessor 的 process 方法尚未实现")

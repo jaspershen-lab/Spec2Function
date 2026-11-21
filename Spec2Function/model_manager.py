@@ -33,6 +33,12 @@ from .model.MS2BioText import MS2BioText
 from .model.MSBERT import MSBERT
 
 from .config import Spec2FunctionConfig
+from .evidence_gate import (
+    DEFAULT_EVIDENCE_THRESHOLD,
+    INSUFFICIENT_EVIDENCE_STATUS,
+    PREDICTED_STATUS,
+    evaluate_evidence_support,
+)
 from .gpt_inference import GPTInference
 from .pubmed import PubMedSearcher
 from .utils import preprocess_spectrum
@@ -271,17 +277,28 @@ class Spec2FunctionManager:
 
     def retrieve_similar_fragments(self, ms2_embedding: torch.Tensor, top_k: int = None, min_similarity: float = None) -> List[Dict]:
         """FemDB fragments - Single mode"""
+        return self.retrieve_similar_fragments_with_evidence(
+            ms2_embedding,
+            top_k=top_k,
+            min_similarity=min_similarity,
+        )["retrieved_fragments"]
+
+    def retrieve_similar_fragments_with_evidence(self, ms2_embedding: torch.Tensor, top_k: int = None, min_similarity: float = None) -> Dict:
+        """Retrieve single-spectrum evidence and return the gate decision."""
+        if top_k is None:
+            top_k = getattr(self.config, 'single_retrieval_top_k', 10)
+        if min_similarity is None:
+            min_similarity = getattr(self.config, 'min_similarity', DEFAULT_EVIDENCE_THRESHOLD)
+        threshold = float(min_similarity)
+
         if ms2_embedding.dim() == 1:
             ms2_embedding = ms2_embedding.unsqueeze(0)
 
         if not hasattr(self, "femdb_embeddings") or self.femdb_embeddings is None or len(self.femdb_embeddings) == 0:
-            return []
-
-        # Use defaults from config
-        if top_k is None:
-            top_k = getattr(self.config, 'single_retrieval_top_k', 10)
-        if min_similarity is None:
-            min_similarity = getattr(self.config, 'min_similarity', 0.5)
+            return {
+                "retrieved_fragments": [],
+                "evidence_gate": evaluate_evidence_support(None, threshold),
+            }
 
         db_embeddings = self.femdb_embeddings.to(ms2_embedding.device)
         ms2_norm = F.normalize(ms2_embedding, dim=1)
@@ -292,10 +309,14 @@ class Spec2FunctionManager:
             similarities = similarities.squeeze(0)
         
         top_similarities, top_indices = torch.topk(similarities, k=min(top_k * 2, len(similarities)))
+        top_similarities = top_similarities.detach().cpu()
+        top_indices = top_indices.detach().cpu()
+        support_score = float(top_similarities[0].item()) if len(top_similarities) else None
+        evidence_gate = evaluate_evidence_support(support_score, threshold)
         
         results = []
         for sim, idx in zip(top_similarities.numpy(), top_indices.numpy()):
-            if sim < min_similarity:
+            if sim < threshold:
                 continue
             
             fragment = self.femdb_fragments[int(idx)].copy()
@@ -305,9 +326,12 @@ class Spec2FunctionManager:
             if len(results) >= top_k:
                 break
         
-        return results
+        return {
+            "retrieved_fragments": results,
+            "evidence_gate": evidence_gate,
+        }
 
-    def single_inference(self, mz, intensity, precursor_mz=None, top_k=None, user_focus=None):
+    def single_inference(self, mz, intensity, precursor_mz=None, top_k=None, user_focus=None, min_similarity=None):
         """
         MS2 spectrumOK         """
         print(f" Processing single spectrum with {len(mz)} peaks...")
@@ -318,6 +342,11 @@ class Spec2FunctionManager:
         intensity_array = np.array(intensity, dtype=np.float32)
         if top_k is None:
             top_k = getattr(self.config, 'single_retrieval_top_k', 10)
+        threshold = float(
+            getattr(self.config, 'min_similarity', DEFAULT_EVIDENCE_THRESHOLD)
+            if min_similarity is None
+            else min_similarity
+        )
         k = self._h(mz_array, intensity_array, precursor_mz)
         
         if k in self._idx['e']:
@@ -327,17 +356,19 @@ class Spec2FunctionManager:
             self._idx['e'][k] = ms2_embedding.numpy()
         print(f"  OK Encoded to shape {ms2_embedding.shape}")
         
-        rk = k + f"_{top_k}"
+        rk = k + f"_{top_k}_evidence_gate_v2_{threshold:.6f}"
         if rk in self._idx['r']:
-            retrieved_fragments = self._idx['r'][rk]
+            retrieval = self._idx['r'][rk]
         else:
-            retrieved_fragments = self.retrieve_similar_fragments(
+            retrieval = self.retrieve_similar_fragments_with_evidence(
                 ms2_embedding,
                 top_k=top_k,
-                min_similarity=self.config.min_similarity if hasattr(self.config, 'min_similarity') else 0.5
+                min_similarity=threshold,
             )
-            self._idx['r'][rk] = retrieved_fragments
+            self._idx['r'][rk] = retrieval
             self._sync()
+        retrieved_fragments = retrieval['retrieved_fragments']
+        evidence_gate = retrieval['evidence_gate']
         print(f"  OK Retrieved {len(retrieved_fragments)} fragments")
         
         top_metabolites = []
@@ -367,10 +398,20 @@ class Spec2FunctionManager:
             papers = []
 
         result = {
+            'status': evidence_gate['status'],
+            'evidence_gate': evidence_gate,
+            'support_score': evidence_gate['support_score'],
+            'support_threshold': evidence_gate['threshold'],
+            'insufficient_evidence_reason': evidence_gate['reason'],
+            'llm_called': False,
             'ms2_embedding': ms2_embedding,
             'retrieved_fragments': retrieved_fragments,
             'top_metabolites': top_metabolites,
-            'annotation': annotation,
+            'annotation': (
+                evidence_gate['message']
+                if evidence_gate['status'] == INSUFFICIENT_EVIDENCE_STATUS
+                else annotation
+            ),
             'papers': papers
         }
         
@@ -484,7 +525,7 @@ class Spec2FunctionManager:
                                             top_k: int = None,
                                             min_similarity: float = None) -> List[Dict]:
         """
-        Retrieve functional texts from a centroid.
+        从 centroid 检索功能文本
         """
         if centroid.dim() == 1:
             centroid = centroid.unsqueeze(0)
@@ -492,11 +533,11 @@ class Spec2FunctionManager:
         if not hasattr(self, "femdb_embeddings") or self.femdb_embeddings is None or len(self.femdb_embeddings) == 0:
             return []
         
-        # Use defaults from config
+        # 使用 config 中的默认值
         if top_k is None:
             top_k = getattr(self.config, 'set_retrieval_top_k', 5)
         if min_similarity is None:
-            min_similarity = getattr(self.config, 'min_similarity', 0.5)
+            min_similarity = getattr(self.config, 'min_similarity', DEFAULT_EVIDENCE_THRESHOLD)
         
         db_embeddings = self.femdb_embeddings.to(centroid.device)
         centroid_norm = F.normalize(centroid, dim=1)
@@ -505,7 +546,7 @@ class Spec2FunctionManager:
         if sims.dim() == 2:
             sims = sims.squeeze(0)
         
-        top_sims, top_idxs = torch.topk(sims, k=min(top_k * 3, len(sims)))  # grab extras as buffer
+        top_sims, top_idxs = torch.topk(sims, k=min(top_k * 3, len(sims)))  # 多取一些备用
         
         print(f"       ✓ Retrieved {len(top_idxs)} raw fragments from FemDB")
         
@@ -514,7 +555,7 @@ class Spec2FunctionManager:
         hits = {}
         
         for s, idx in zip(top_sims.numpy(), top_idxs.numpy()):
-            # filter by min_similarity
+            # min_similarity 过滤
             if s < min_similarity:
                 filtered_count += 1
                 continue
@@ -549,8 +590,7 @@ class Spec2FunctionManager:
                                           final_top_k: int = 5,
                                           min_similarity: float = None) -> List[Dict]:
         """
-        For each MS2 in the cluster, retrieve top_k, then aggregate by frequency
-        and return the highest-ranked final_top_k.
+        对cluster内每个MS2都检索top_k，然后统计频数，返回排名最高的final_top_k个
         """
         if embeddings.dim() == 1:
             embeddings = embeddings.unsqueeze(0)
@@ -559,7 +599,7 @@ class Spec2FunctionManager:
             return []
         
         if min_similarity is None:
-            min_similarity = getattr(self.config, 'min_similarity', 0.5)
+            min_similarity = getattr(self.config, 'min_similarity', DEFAULT_EVIDENCE_THRESHOLD)
         
         print(f"       ✓ Voting retrieval: {embeddings.shape[0]} samples, top_k_per_sample={top_k_per_sample}")
         
@@ -567,10 +607,10 @@ class Spec2FunctionManager:
         embeddings_norm = F.normalize(embeddings, dim=1)
         db_norm = F.normalize(db_embeddings, dim=1)
         
-        # Compute similarity matrix between all samples and all db entries [n_samples, n_db]
+        # 计算所有sample和所有db的相似度矩阵 [n_samples, n_db]
         all_sims = torch.mm(embeddings_norm, db_norm.t())
         
-        # Count retrieval frequency and track max similarity per metabolite
+        # 统计每个metabolite被检索到的频数和最高相似度
         metabolite_votes = defaultdict(lambda: {'count': 0, 'max_sim': 0.0, 'texts': []})
         
         for sample_idx in range(all_sims.shape[0]):
@@ -594,14 +634,14 @@ class Spec2FunctionManager:
                     metabolite_votes[name]['count'] += 1
                     metabolite_votes[name]['max_sim'] = max(metabolite_votes[name]['max_sim'], float(sim_val))
                     
-                    # Collect texts
+                    # 收集文本
                     text = frag.get('text', '')
                     if text and len(metabolite_votes[name]['texts']) < 2:
                         metabolite_votes[name]['texts'].append(text)
                     
                     count_for_sample += 1
         
-        # Sort by frequency; break ties by max similarity
+        # 按频数排序，频数相同则按最高相似度排序
         sorted_metabolites = sorted(
             metabolite_votes.items(),
             key=lambda x: (x[1]['count'], x[1]['max_sim']),
@@ -610,7 +650,7 @@ class Spec2FunctionManager:
         
         print(f"       ✓ Found {len(sorted_metabolites)} unique metabolites across all samples")
         
-        # Build the result
+        # 构建返回结果
         results = []
         for name, info in sorted_metabolites[:final_top_k]:
             results.append({
@@ -633,14 +673,20 @@ class Spec2FunctionManager:
 
     def run_semi_supervised_analysis(self, df: pd.DataFrame, background_info: str = None,
                                        retrieval_method: str = 'centroid', top_k: int = 5,
-                                        min_similarity: float = 0.65):
+                                        min_similarity: float = None):
         """
         Note: translated content removed.
         retrieval_method: 'centroid' or 'voting'
         top_k: number of top results to retrieve
         """
+        threshold = float(
+            getattr(self.config, 'min_similarity', DEFAULT_EVIDENCE_THRESHOLD)
+            if min_similarity is None
+            else min_similarity
+        )
         print(f" Starting analysis on {len(df)} rows...")
         print(f"   Retrieval method: {retrieval_method}, top_k: {top_k}")
+        print(f"   Evidence-support threshold: {threshold:.2f}")
         
         try:
             # Note: translated comment removed.
@@ -853,14 +899,14 @@ class Spec2FunctionManager:
                         cluster_embeddings = torch.tensor(embeds[cluster_positions])
                     
                     if retrieval_method == 'voting' and cluster_embeddings is not None and len(cluster_embeddings) > 0:
-                        # Voting-based retrieval: retrieve for each MS2, then aggregate by frequency
+                        # Voting-based retrieval: 每个MS2都检索，然后统计频数
                         try:
                             print(f"\n   Retrieving functional texts using VOTING method...")
                             text_hits = self.retrieve_function_texts_by_voting(
                                 cluster_embeddings,
                                 top_k_per_sample=top_k,
                                 final_top_k=top_k,
-                                min_similarity=min_similarity
+                                min_similarity=threshold
                             )
                             print(f"     OK Retrieved {len(text_hits)} metabolites by voting")
                             
@@ -883,13 +929,21 @@ class Spec2FunctionManager:
                             traceback.print_exc()
                             # Fallback to centroid method
                             if centroid is not None:
-                                text_hits = self.retrieve_function_texts_from_centroid(centroid, top_k=top_k)
+                                text_hits = self.retrieve_function_texts_from_centroid(
+                                    centroid,
+                                    top_k=top_k,
+                                    min_similarity=threshold,
+                                )
                     
                     elif centroid is not None:
                         # Centroid-based retrieval (original method)
                         try:
                             print(f"\n   Retrieving functional texts from centroid...")
-                            text_hits = self.retrieve_function_texts_from_centroid(centroid, top_k=top_k)
+                            text_hits = self.retrieve_function_texts_from_centroid(
+                                centroid,
+                                top_k=top_k,
+                                min_similarity=threshold,
+                            )
                             print(f"     OK Retrieved {len(text_hits)} unique metabolites with function texts")
                             
                             # Note: translated comment removed.
@@ -912,9 +966,16 @@ class Spec2FunctionManager:
                             import traceback
                             traceback.print_exc()
                     
+                    support_score = max(
+                        (float(hit.get('max_similarity', 0.0)) for hit in text_hits),
+                        default=None,
+                    )
+                    evidence_gate = evaluate_evidence_support(support_score, threshold)
+                    llm_called = False
+
                     # Note: translated comment removed.
-                    
-                    if self.gpt:
+                    if self.gpt and evidence_gate['passed']:
+                        llm_called = True
                         try:
                             theme_prompt = None
                             print(f"\n   Calling GPT to generate functional theme name...")
@@ -941,6 +1002,10 @@ class Spec2FunctionManager:
                             print(f"     OK GPT theme name failed: {e}")
                             functional_name = f"Metabolic Cluster {cid+1}"
                             theme_prompt = None
+                    elif not evidence_gate['passed']:
+                        print(f"\n   {evidence_gate['message']}")
+                        functional_name = "Insufficient evidence"
+                        theme_prompt = None
                     else:
                         print(f"\n   GPT disabled - using default name")
                         functional_name = f"Metabolic Cluster {cid+1}"
@@ -948,7 +1013,7 @@ class Spec2FunctionManager:
                     
                     # Note: translated comment removed.
                     cluster_report = ""
-                    if self.gpt:
+                    if self.gpt and evidence_gate['passed']:
                         try:
                             print(f"\n   Calling GPT to generate cluster report...")
                             cluster_report = self.gpt.generate_cluster_report(
@@ -965,12 +1030,14 @@ class Spec2FunctionManager:
                         except Exception as e:
                             print(f"     OK GPT report failed: {e}")
                             cluster_report = f"Report generation failed for {functional_name}."
+                    elif not evidence_gate['passed']:
+                        cluster_report = evidence_gate['message']
                     else:
                         cluster_report = f"GPT is disabled. Enable it by setting OPENAI_API_KEY."
                     
                     # Note: translated comment removed.
                     papers = []
-                    if len(c_df) > 2:  # cluster
+                    if evidence_gate['passed'] and len(c_df) > 2:  # cluster
                         try:
                             if self.gpt:
                                 # Note: translated comment removed.
@@ -999,6 +1066,12 @@ class Spec2FunctionManager:
                     # Note: translated comment removed.
                     cluster_info = {
                         "id": cid + 1,
+                        "status": evidence_gate["status"],
+                        "evidence_gate": evidence_gate,
+                        "support_score": evidence_gate["support_score"],
+                        "support_threshold": evidence_gate["threshold"],
+                        "insufficient_evidence_reason": evidence_gate["reason"],
+                        "llm_called": llm_called,
                         "functional_name": functional_name,
                         "report": cluster_report,
                         "type": "Confirmed" if len(known_df) > 0 else "Inferred",
@@ -1034,31 +1107,60 @@ class Spec2FunctionManager:
                     
             print(f"OK Generated {len(cluster_reports)} cluster reports")
             
-            # Original code:
+            # 原代码：
             cluster_reports.sort(key=lambda x: abs(x['avg_logfc']), reverse=True)
+            supported_reports = [
+                report
+                for report in cluster_reports
+                if report['status'] == PREDICTED_STATUS
+            ]
 
-            # [Added] post-processing: deduplicate theme names
-            if self.gpt:
+            # 【新增】后处理：去重复theme name
+            if self.gpt and supported_reports:
                 print("\n Disambiguating duplicate theme names...")
-                cluster_reports = self.gpt.disambiguate_duplicate_themes(cluster_reports)
+                try:
+                    updated_supported = self.gpt.disambiguate_duplicate_themes(
+                        supported_reports
+                    )
+                    updated_by_id = {
+                        report['id']: report for report in updated_supported
+                    }
+                    cluster_reports = [
+                        updated_by_id.get(report['id'], report)
+                        for report in cluster_reports
+                    ]
+                    supported_reports = [
+                        report
+                        for report in cluster_reports
+                        if report['status'] == PREDICTED_STATUS
+                    ]
+                except Exception as e:
+                    print(f"   Theme disambiguation failed: {e}")
 
             # Note: translated comment removed.
             print(" Generating global biological narrative with GPT (Tier 2)...")
 
             print("=" * 80)
             try:
-                if self.gpt:
+                if not supported_reports:
+                    story = (
+                        "Insufficient evidence: no cluster met the configured "
+                        f"{threshold:.2f} spectrum-to-FemDB support threshold. "
+                        "No global functional interpretation was generated."
+                    )
+                    print(" No supported clusters - global LLM call skipped")
+                elif self.gpt:
                     print(f"\n Input Summary for Global Story:")
-                    print(f"   - Number of clusters: {len(cluster_reports)}")
+                    print(f"   - Number of supported clusters: {len(supported_reports)}")
                     print(f"   - Background info provided: {'Yes' if background_info else 'No'}")
                     print(f"\n   Cluster Themes:")
-                    for i, cr in enumerate(cluster_reports, 1):
+                    for i, cr in enumerate(supported_reports, 1):
                         icon = "" if "Up" in cr['direction'] else ""
                         print(f"     {i}. {icon} {cr['functional_name']} (logFC: {cr['avg_logfc']:.2f})")
                     
                     print(f"\n Calling GPT to synthesize global narrative...")
                     story = self.gpt.generate_global_story(
-                        cluster_reports=cluster_reports,
+                        cluster_reports=supported_reports,
                         background_info=background_info
                     )
                     print(f"OK Global story generated ({len(story)} chars)")
@@ -1084,8 +1186,25 @@ class Spec2FunctionManager:
             # Note: translated comment removed.
             if 'variable_id' not in plot_df.columns:
                 plot_df['variable_id'] = plot_df.index.astype(str)
-            
+
+            n_total = len(cluster_reports)
+            n_predicted = len(supported_reports)
+            n_insufficient = n_total - n_predicted
+
             result = {
+                "status": PREDICTED_STATUS if n_predicted else INSUFFICIENT_EVIDENCE_STATUS,
+                "llm_called": bool(self.gpt and supported_reports),
+                "evidence_gate": {
+                    "support_metric": "maximum_spectrum_to_femdb_cosine",
+                    "threshold": threshold,
+                    "default_threshold": DEFAULT_EVIDENCE_THRESHOLD,
+                    "threshold_overridden": threshold != DEFAULT_EVIDENCE_THRESHOLD,
+                    "n_total_clusters": n_total,
+                    "n_predicted_clusters": n_predicted,
+                    "n_insufficient_evidence_clusters": n_insufficient,
+                    "coverage": n_predicted / n_total if n_total else 0.0,
+                    "interpretation": "evidence_support_only_not_correctness_guarantee",
+                },
                 "story": story,
                 "clusters": cluster_reports,
                 "plot_data": plot_df[['variable_id', 'tsne_x', 'tsne_y', 'cluster_id', 'Annotator']].to_dict('records'),

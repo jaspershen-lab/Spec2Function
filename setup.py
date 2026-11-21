@@ -7,7 +7,7 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 setup(
     name="spec2function",
-    version="0.2.0",
+    version="0.2.2",
     description="Deep learning model for MS2 spectrum annotation and metabolite set analysis",
     author="Feifan Zhang",
     long_description=README,
@@ -30,9 +30,10 @@ setup(
         "huggingface_hub>=0.20",
         "python-dotenv>=1.0",
         "openai>=1.30",
+        "biopython>=1.81",
     ],
     extras_require={
-        "train": ["wandb>=0.16"],
+        "train": ["h5py>=3.8", "wandb>=0.16"],
     },
     classifiers=[
         "Programming Language :: Python :: 3",

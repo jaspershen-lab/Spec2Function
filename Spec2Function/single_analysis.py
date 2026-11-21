@@ -25,6 +25,12 @@ try:
 except Exception as exc:
     raise ImportError("MS2BioText model modules are not available") from exc
 
+from .evidence_gate import (
+    DEFAULT_EVIDENCE_THRESHOLD,
+    INSUFFICIENT_EVIDENCE_STATUS,
+    evaluate_evidence_support,
+)
+
 
 if platform.system() != "Windows":
     pathlib.WindowsPath = pathlib.PosixPath
@@ -37,7 +43,7 @@ class MS2BioTextAnalysisConfig:
     femdb_jsonl: Path
     femdb_embeddings: Path
     specter_cache_dir: Optional[Path] = None
-    min_similarity: float = 0.5
+    min_similarity: float = DEFAULT_EVIDENCE_THRESHOLD
     cache_path: Optional[Path] = None
     msbert_vocab_size: int = 100002
     msbert_hidden_size: int = 512
@@ -326,11 +332,33 @@ class SingleSpectrumAnalyzer:
         top_k: int = 10,
         min_similarity: Optional[float] = None,
     ) -> List[Dict]:
+        return self.retrieve_similar_fragments_with_evidence(
+            ms2_embedding,
+            top_k=top_k,
+            min_similarity=min_similarity,
+        )["retrieved_fragments"]
+
+    def retrieve_similar_fragments_with_evidence(
+        self,
+        ms2_embedding: torch.Tensor,
+        top_k: int = 10,
+        min_similarity: Optional[float] = None,
+    ) -> Dict:
+        """Retrieve supported fragments and expose the gate decision."""
+
+        threshold = (
+            float(min_similarity)
+            if min_similarity is not None
+            else float(self.config.min_similarity)
+        )
         if ms2_embedding.dim() == 1:
             ms2_embedding = ms2_embedding.unsqueeze(0)
 
         if self.femdb_embeddings is None or len(self.femdb_embeddings) == 0:
-            return []
+            return {
+                "retrieved_fragments": [],
+                "evidence_gate": evaluate_evidence_support(None, threshold),
+            }
 
         db_embeddings = self.femdb_embeddings.to(ms2_embedding.device)
         ms2_norm = F.normalize(ms2_embedding, dim=1)
@@ -343,11 +371,12 @@ class SingleSpectrumAnalyzer:
             similarities, k=min(top_k * 2, len(similarities))
         )
 
-        threshold = (
-            min_similarity
-            if min_similarity is not None
-            else self.config.min_similarity
+        top_similarities = top_similarities.detach().cpu()
+        top_indices = top_indices.detach().cpu()
+        support_score = (
+            float(top_similarities[0].item()) if len(top_similarities) else None
         )
+        gate = evaluate_evidence_support(support_score, threshold)
 
         results = []
         for sim, idx in zip(top_similarities.numpy(), top_indices.numpy()):
@@ -359,7 +388,10 @@ class SingleSpectrumAnalyzer:
             if len(results) >= top_k:
                 break
 
-        return results
+        return {
+            "retrieved_fragments": results,
+            "evidence_gate": gate,
+        }
 
     def single_inference(
         self,
@@ -367,6 +399,7 @@ class SingleSpectrumAnalyzer:
         intensity,
         precursor_mz=None,
         top_k: int = 10,
+        min_similarity: Optional[float] = None,
     ) -> Dict:
         mz_array = np.array(mz, dtype=np.float32)
         intensity_array = np.array(intensity, dtype=np.float32)
@@ -378,16 +411,25 @@ class SingleSpectrumAnalyzer:
             ms2_embedding = self.encode_ms2(mz_array, intensity_array, precursor_mz)
             self._idx["e"][k] = ms2_embedding.numpy()
 
-        rk = k + f"_{top_k}"
+        threshold = (
+            float(min_similarity)
+            if min_similarity is not None
+            else float(self.config.min_similarity)
+        )
+        rk = k + f"_{top_k}_evidence_gate_v2_{threshold:.6f}"
         if rk in self._idx["r"]:
-            retrieved_fragments = self._idx["r"][rk]
+            retrieval = self._idx["r"][rk]
         else:
-            retrieved_fragments = self.retrieve_similar_fragments(
+            retrieval = self.retrieve_similar_fragments_with_evidence(
                 ms2_embedding,
                 top_k=top_k,
+                min_similarity=threshold,
             )
-            self._idx["r"][rk] = retrieved_fragments
+            self._idx["r"][rk] = retrieval
             self._sync()
+
+        retrieved_fragments = retrieval["retrieved_fragments"]
+        evidence_gate = retrieval["evidence_gate"]
 
         top_metabolites = []
         seen_accessions = set()
@@ -400,25 +442,84 @@ class SingleSpectrumAnalyzer:
         papers = []
         if self.pubmed and top_metabolites:
             try:
-                search_metabolites = top_metabolites[:3]
+                # The reported Mode 1 workflow queries PubMed with the five
+                # highest-ranked unique metabolite candidates.
+                search_metabolites = top_metabolites[:5]
                 papers = self.pubmed.search_by_metabolites(search_metabolites)
             except Exception:
                 papers = []
 
         return {
+            "status": evidence_gate["status"],
+            "evidence_gate": evidence_gate,
+            "support_score": evidence_gate["support_score"],
+            "support_threshold": evidence_gate["threshold"],
+            "insufficient_evidence_reason": evidence_gate["reason"],
+            "llm_called": False,
             "ms2_embedding": ms2_embedding,
             "retrieved_fragments": retrieved_fragments,
             "top_metabolites": top_metabolites,
-            "annotation": None,
+            "annotation": (
+                evidence_gate["message"]
+                if evidence_gate["status"] == INSUFFICIENT_EVIDENCE_STATUS
+                else None
+            ),
             "papers": papers,
         }
+
+    def analyze_spectrum(
+        self,
+        mz,
+        intensity,
+        precursor_mz=None,
+        top_k: int = 10,
+        min_similarity: Optional[float] = None,
+        user_focus: Optional[str] = None,
+    ) -> Dict:
+        """Run retrieval and annotation while enforcing abstention."""
+
+        result = self.single_inference(
+            mz=mz,
+            intensity=intensity,
+            precursor_mz=precursor_mz,
+            top_k=top_k,
+            min_similarity=min_similarity,
+        )
+        if result["status"] == INSUFFICIENT_EVIDENCE_STATUS:
+            return result
+
+        result["annotation"] = self.generate_annotation(
+            retrieved_fragments=result["retrieved_fragments"],
+            papers=result["papers"],
+            user_focus=user_focus,
+            threshold=result["support_threshold"],
+        )
+        result["llm_called"] = self.gpt is not None
+        return result
 
     def generate_annotation(
         self,
         retrieved_fragments: List[Dict],
         papers: Optional[List[Dict]] = None,
         user_focus: Optional[str] = None,
+        threshold: Optional[float] = None,
     ) -> str:
+        configured_threshold = float(
+            self.config.min_similarity if threshold is None else threshold
+        )
+        support_scores = []
+        for fragment in retrieved_fragments:
+            try:
+                score = float(fragment["similarity"])
+                if np.isfinite(score):
+                    support_scores.append(score)
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        support_score = max(support_scores, default=None)
+        gate = evaluate_evidence_support(support_score, configured_threshold)
+        if not gate["passed"]:
+            return gate["message"]
         if not self.gpt:
             return "GPT is disabled. Provide a GPTInference instance to enable it."
         return self.gpt.single_annotation(

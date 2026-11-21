@@ -1,18 +1,16 @@
-# MS2BioText inputs include both MS2 and BioText. One BioText corresponds to one molecule,
-# while one molecule can correspond to multiple MS2. So when building the dataset we need to store:
-#   - the list of MS2
-#   - the molecule for each MS2
-#   - the BioText for each molecule
-# __getitem__ should return input_ids (m/z), intensity, and BioText.
-# (Add class methods so init parameters can choose how to process BioText.)
-# Open question: how should we store extra per-MS2 info needed for downstream experiments?
+# 所以MS2BioText的输入应该是包括MS2与BioText。然而一个BioText对应一个分子，一个分子对应多个MS2。所以在dataset构建的时候，需要储存：
+# MS2的列表
+# MS2对应的分子的列表
+# 分子对应的BioText的列表
+# 最后item的时候返回input_ids（m/z），intensity，BioText
+# （这里添加一系列类内方法，在init的时候输入参数可以选择处理BioText的类内方法）
+# 但是问题是但是在之后的实验里，还要记录对于每个MS2的其他信息，这个怎么储存。
 
 
-# Plan: implement the dataset and create an instance first.
-# Read the HMDB dataset.
-# HMDB.h5 holds MS2 data (read as list?), HMDB.parquet holds metadata (read as ?).
-# BioText is a folder of txt files named with HMDB IDs (read as ?).
-# Then load test data and verify both models run end-to-end.
+# 先完成dataset然后创建实例
+# 读取HMDB数据集
+# HMDB.h5是MS2数据读取为list？，HMDB.parquet是meta数据，读取为？然后Biotext是一个文件夹下包含的一系列txt文件，文件名为HMDB的id，读取为？
+# ，读取test data跑通两个模型试试
 
 import pickle
 import h5py
@@ -42,12 +40,11 @@ _T_co = TypeVar("_T_co", covariant=True)
 
 class MS2MoleculeDistributedSampler(Sampler[_T_co]):
     """
-    Distributed sampler designed for MS2 contrastive learning.
-
-    Added feature: assign a non-conflicting text to each sample in a batch.
-    - Ensures the text picked for each molecule does not appear in any other molecule's
-      candidate list within the batch.
-    - Guarantees that only the diagonal is positive within the batch.
+    专为MS2对比学习设计的分布式采样器
+    
+    新增功能：为每个batch中的样本分配不冲突的text
+    - 确保batch内每个molecule选择的text不出现在其他molecule的候选列表中
+    - 保证batch内只有对角线是正样本
     """
     
     def __init__(
@@ -82,26 +79,26 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
         self.shuffle = shuffle
         self.seed = seed
         
-        # Build the molecule -> texts mapping
+        # 构建molecule -> texts的映射
         self.molecule_to_texts = self._build_molecule_text_mapping()
-
-        # Group by molecule and sort by MS2 count
+        
+        # 按molecule分组并按MS2数量排序
         self.molecule_groups = self._group_by_molecule()
         self.sorted_molecules = self._sort_molecules_by_ms2_count()
-
-        # Generate the batch allocation plan
+        
+        # 生成batch分配方案
         self.batch_indices = self._create_batch_allocation()
-
-        # Ensure divisibility by the number of GPUs
+        
+        # 确保能被GPU数整除
         self._adjust_for_distributed()
-
-        # Compute number of samples per process
+        
+        # 计算每个进程的样本数
         total_batches = len(self.batch_indices)
         batches_per_replica = total_batches // self.num_replicas
         self.num_samples = batches_per_replica * self.batch_size
         
     def _build_molecule_text_mapping(self) -> Dict[str, List[str]]:
-        """Build the candidate text list for each molecule."""
+        """构建每个molecule的候选text列表"""
         molecule_to_texts = {}
         
         for mol_id, entry in self.dataset.biotext_data.items():
@@ -121,7 +118,7 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
         return molecule_to_texts
     
     def _group_by_molecule(self) -> Dict[str, List[int]]:
-        """Group MS2 data by molecule ID."""
+        """按molecule ID对MS2数据进行分组"""
         molecule_groups = {}
         for idx in range(len(self.dataset)):
             ms2_id = self.dataset.ms2_ids[idx]
@@ -134,7 +131,7 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
         return molecule_groups
     
     def _sort_molecules_by_ms2_count(self) -> List[Tuple[str, List[int]]]:
-        """Sort molecules by their MS2 count, descending."""
+        """按每个molecule拥有的MS2数量从多到少排序"""
         molecule_items = [(mol_id, indices) for mol_id, indices in self.molecule_groups.items()]
         sorted_items = sorted(molecule_items, key=lambda x: len(x[1]), reverse=True)
         
@@ -148,15 +145,15 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
     
     def _assign_texts_for_batch(self, batch_molecule_ids: List[str]) -> Dict[str, int]:
         """
-        Assign a text index to each molecule in the batch.
-        Ensure the chosen text is not in any other molecule's candidate list.
-
-        Returns: {molecule_id: text_index}
+        为batch中的每个molecule分配一个text index
+        确保选中的text不在其他molecule的候选列表中
+        
+        返回: {molecule_id: text_index}
         """
         mol_to_text_idx = {}
-        occupied_texts = set()  # already-occupied texts
-
-        # Sort by candidate count ascending; handle molecules with the smallest choice space first
+        occupied_texts = set()  # 已被占用的text
+        
+        # 按照候选text数量从少到多排序，优先处理选择空间小的molecule
         sorted_mols = sorted(
             batch_molecule_ids,
             key=lambda mol_id: len(self.molecule_to_texts.get(mol_id, []))
@@ -170,11 +167,11 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
                 mol_to_text_idx[mol_id] = 0
                 continue
             
-            # Find all texts that are unoccupied AND not in any other molecule's candidates
+            # 找到所有未被占用且不在其他molecule候选中的text
             available_indices = []
             for i, text in enumerate(candidate_texts):
                 if text not in occupied_texts:
-                    # Check whether this text appears in another molecule's candidates
+                    # 检查这个text是否在其他molecule的候选中
                     text_in_others = False
                     for other_mol_id in batch_molecule_ids:
                         if other_mol_id != mol_id:
@@ -186,13 +183,13 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
                     if not text_in_others:
                         available_indices.append(i)
             
-            # If usable texts exist, pick one at random
+            # 如果有可用的text，随机选一个
             if available_indices:
                 chosen_idx = random.choice(available_indices)
                 mol_to_text_idx[mol_id] = chosen_idx
                 occupied_texts.add(candidate_texts[chosen_idx])
             else:
-                # Fallback: pick an unoccupied text at random (may still appear in others' candidates)
+                # Fallback: 随机选一个未被占用的（可能在其他molecule的候选中）
                 fallback_indices = [i for i, text in enumerate(candidate_texts) 
                                   if text not in occupied_texts]
                 if fallback_indices:
@@ -201,7 +198,7 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
                     occupied_texts.add(candidate_texts[chosen_idx])
                     print(f"⚠️ Fallback: Molecule {mol_id} text may conflict with others")
                 else:
-                    # Extreme case: all texts are already occupied
+                    # 极端情况：所有text都被占用了
                     chosen_idx = random.randint(0, len(candidate_texts) - 1)
                     mol_to_text_idx[mol_id] = chosen_idx
                     print(f"⚠️ Extreme fallback: All texts occupied for {mol_id}")
@@ -209,7 +206,7 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
         return mol_to_text_idx
     
     def _create_batch_allocation(self) -> List[List[int]]:
-        """Create the batch allocation plan."""
+        """创建batch分配方案"""
         molecule_ms2_usage = {}
         for mol_id, indices in self.sorted_molecules:
             molecule_ms2_usage[mol_id] = {
@@ -288,7 +285,7 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
         return batch_indices
     
     def _adjust_for_distributed(self):
-        """Adjust the number of batches so it is divisible by the number of GPUs."""
+        """调整batch数量以确保能被GPU数整除"""
         total_batches = len(self.batch_indices)
         remainder = total_batches % self.num_replicas
         
@@ -309,7 +306,7 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
         print(f"Each GPU will process {final_batches // self.num_replicas} batches")
     
     def __iter__(self) -> Iterator[_T_co]:
-        # Get the batches that this process should handle
+        # 获取当前进程应该处理的batch
         total_batches = len(self.batch_indices)
         batches_per_replica = total_batches // self.num_replicas
         
@@ -327,11 +324,11 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
             for batch in my_batches:
                 random.Random(self.seed + self.epoch).shuffle(batch)
         
-        # *** Key step: assign texts for each batch ***
+        # *** 关键：为每个batch分配text ***
         self.dataset.text_assignment.clear()
-
+        
         for batch_indices in my_batches:
-            # Get all molecule IDs in the batch
+            # 获取batch中所有molecule ID
             batch_molecule_ids = []
             ms2_id_to_mol_id = {}
             
@@ -341,16 +338,16 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
                 batch_molecule_ids.append(mol_id)
                 ms2_id_to_mol_id[ms2_id] = mol_id
             
-            # Assign text indices for this batch
+            # 为这个batch分配text indices
             mol_to_text_idx = self._assign_texts_for_batch(batch_molecule_ids)
-
-            # Write the assignment back into dataset.text_assignment
+            
+            # 将分配结果写入dataset.text_assignment
             for idx in batch_indices:
                 ms2_id = self.dataset.ms2_ids[idx]
                 mol_id = ms2_id_to_mol_id[ms2_id]
                 self.dataset.text_assignment[ms2_id] = mol_to_text_idx.get(mol_id, 0)
         
-        # Flatten indices across all batches
+        # 展平所有batch的indices
         all_indices = []
         for batch in my_batches:
             all_indices.extend(batch)
@@ -361,7 +358,7 @@ class MS2MoleculeDistributedSampler(Sampler[_T_co]):
         return self.num_samples
     
     def set_epoch(self, epoch: int) -> None:
-        """Set the current epoch so that shuffle differs across epochs."""
+        """设置当前epoch，用于确保每个epoch的shuffle结果不同"""
         self.epoch = epoch
 
 
@@ -376,46 +373,46 @@ import random
 
 def sample_truncated_normal(mean, std, low, high):
     """
-    Sample from a truncated normal distribution.
-
+    从截断正态分布中采样
+    
     Args:
-        mean: mean
-        std: standard deviation
-        low: lower bound
-        high: upper bound
-
+        mean: 均值
+        std: 标准差
+        low: 下界
+        high: 上界
+    
     Returns:
-        sampled value
+        采样值
     """
     max_attempts = 1000
     for _ in range(max_attempts):
         sample = np.random.normal(mean, std)
         if low <= sample <= high:
             return sample
-    # If we fail to sample in 1000 attempts, return the clipped value
+    # 如果1000次都没采样到，返回截断后的值
     return np.clip(np.random.normal(mean, std), low, high)
 
 
 def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
     """
-    Dynamic augmentation tuned to External data characteristics (supports random noise ratio).
+    基于External数据特征优化的动态augmentation（支持随机noise ratio）
     """
-    # ===== 0. Read parameters and decide whether to augment =====
+    # ===== 0. 读取参数并决定是否augment =====
     augment_prob = getattr(args, 'augment_prob', 0.5)
     if random.random() > augment_prob:
         return mz_tokens, intensity
-
-    # Ensure intensity is 1D
+    
+    # 确保intensity是1D
     if intensity.dim() == 2:
         intensity = intensity.squeeze(0)
-
+    
     device = mz_tokens.device
-
-    # ===== 1. Build token_id -> m/z mapping =====
+    
+    # ===== 1. 构建token_id到m/z的映射 =====
     idx2word = {v: k for k, v in word2idx.items()}
-
+    
     def token_to_mz(token_id):
-        """Convert a token id back to an actual m/z value."""
+        """将token id转换为实际m/z值"""
         word = idx2word.get(token_id.item(), None)
         if word and word not in ['[PAD]', '[MASK]']:
             try:
@@ -423,12 +420,12 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
             except ValueError:
                 return None
         return None
-
-    # Convert to numpy for computation
+    
+    # 转换为numpy进行计算
     mz_tokens_np = mz_tokens.cpu().numpy()
     intensity_np = intensity.cpu().numpy()
-
-    # Get actual m/z values (skip special tokens)
+    
+    # 获取实际的m/z值（跳过特殊token）
     original_mz = []
     original_intensity = []
     for i, token_id in enumerate(mz_tokens_np):
@@ -444,7 +441,7 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
     original_intensity = np.array(original_intensity)
     max_intensity = original_intensity.max()
     
-    # ===== 2. Identify signal peaks (peaks with intensity > 5%) =====
+    # ===== 2. 识别signal peaks（强度>5%的peaks） =====
     signal_threshold = 0.05
     signal_mask = original_intensity >= signal_threshold * max_intensity
     signal_mz = original_mz[signal_mask]
@@ -453,43 +450,43 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
     if n_signal == 0:
         return mz_tokens, intensity
     
-    # ===== 3. Randomized parameters =====
+    # ===== 3. 🔥 随机化参数 =====
     align_to_external = getattr(args, 'align_to_external', False)
-    randomize_noise_ratio = getattr(args, 'randomize_noise_ratio', True)  # toggle for randomization
-    noise_sampling_strategy = getattr(args, 'noise_sampling_strategy', 'uniform')  # sampling strategy
-
+    randomize_noise_ratio = getattr(args, 'randomize_noise_ratio', True)  # 🔥 新增开关
+    noise_sampling_strategy = getattr(args, 'noise_sampling_strategy', 'uniform')  # 🔥 选择策略
+    
     if align_to_external:
-        # Randomize noise ratio
+        # 🔥 随机化noise ratio
         if randomize_noise_ratio:
             if noise_sampling_strategy == 'uniform':
-                # Strategy 1: uniform distribution
+                # 策略1：均匀分布
                 noise_ratio_range = getattr(args, 'noise_ratio_range', [0.60, 0.90])
                 TARGET_NOISE_RATIO = np.random.uniform(noise_ratio_range[0], noise_ratio_range[1])
-
+                
             elif noise_sampling_strategy == 'normal':
-                # Strategy 2: normal distribution
+                # 策略2：正态分布
                 target_noise_ratio = getattr(args, 'target_noise_ratio', 0.80)
                 noise_ratio_std = getattr(args, 'noise_ratio_std', 0.10)
                 TARGET_NOISE_RATIO = np.random.normal(target_noise_ratio, noise_ratio_std)
                 TARGET_NOISE_RATIO = np.clip(TARGET_NOISE_RATIO, 0.40, 0.95)
-
+                
             elif noise_sampling_strategy == 'bimodal':
-                # Strategy 3: bimodal distribution
+                # 策略3：双模态分布
                 bimodal_dirty_prob = getattr(args, 'bimodal_dirty_prob', 0.7)
                 if np.random.random() < bimodal_dirty_prob:
-                    # Dirty-data mode
+                    # 脏数据模式
                     TARGET_NOISE_RATIO = np.random.uniform(0.70, 0.90)
                 else:
-                    # Clean-data mode
+                    # 干净数据模式
                     TARGET_NOISE_RATIO = np.random.uniform(0.30, 0.60)
             else:
-                # Default: use fixed value
+                # 默认使用固定值
                 TARGET_NOISE_RATIO = getattr(args, 'target_noise_ratio', 0.80)
         else:
-            # No randomization, use fixed value
+            # 不随机化，使用固定值
             TARGET_NOISE_RATIO = getattr(args, 'target_noise_ratio', 0.80)
-
-        # Optional: randomize proximal ratio
+        
+        # 🔥 可选：随机化proximal ratio
         randomize_proximal_ratio = getattr(args, 'randomize_proximal_ratio', False)
         if randomize_proximal_ratio:
             proximal_ratio_range = getattr(args, 'proximal_ratio_range', [0.15, 0.22])
@@ -497,13 +494,13 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
         else:
             PROXIMAL_RATIO_OF_NOISE = getattr(args, 'proximal_ratio_of_noise', 0.18)
         
-        # Intensity parameters
+        # Intensity参数
         PROXIMAL_MEAN = getattr(args, 'proximal_intensity_mean', 0.0115)
         PROXIMAL_STD = getattr(args, 'proximal_intensity_std', 0.0138)
         ISOLATED_MEAN = getattr(args, 'isolated_intensity_mean', 0.0079)
         ISOLATED_STD = getattr(args, 'isolated_intensity_std', 0.0114)
-
-        # Regional weights
+        
+        # 区域权重
         use_regional_weighting = getattr(args, 'use_regional_weighting', True)
         if use_regional_weighting:
             REGION_WEIGHTS = [
@@ -515,7 +512,7 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
         else:
             REGION_WEIGHTS = None
     else:
-        # Parameters when not aligning to External
+        # 不对齐External时的参数
         if randomize_noise_ratio:
             noise_ratio_range = getattr(args, 'noise_ratio_range', [0.30, 0.70])
             TARGET_NOISE_RATIO = np.random.uniform(noise_ratio_range[0], noise_ratio_range[1])
@@ -529,33 +526,33 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
         ISOLATED_STD = 0.0144
         REGION_WEIGHTS = None
     
-    # Spatial distribution parameters
+    # 空间分布参数
     proximal_distance_range = getattr(args, 'proximal_distance_range', [-1.5, 1.5])
     isolated_min_distance = getattr(args, 'isolated_min_distance', 5.0)
-
-    # ===== 4. Compute the total noise count to add =====
+    
+    # ===== 4. 计算需要添加的noise总数 =====
     n_noise_total = int(n_signal * TARGET_NOISE_RATIO / (1 - TARGET_NOISE_RATIO))
     n_proximal = int(n_noise_total * PROXIMAL_RATIO_OF_NOISE)
     n_isolated = n_noise_total - n_proximal
     
-    # ... remaining code unchanged ...
-
+    # ... 后面的代码保持不变 ...
+    
     mz_min, mz_max = original_mz.min(), original_mz.max()
-
-    # ===== 5. Generate proximal noise =====
+    
+    # ===== 5. 生成Proximal Noise =====
     proximal_mz = []
     proximal_intensity = []
-
+    
     for _ in range(n_proximal):
-        # Pick a signal peak as the base
+        # 选择一个signal peak作为base
         base_mz = np.random.choice(signal_mz)
-
-        # Proximal distance range
+        
+        # Proximal距离范围
         offset = np.random.uniform(proximal_distance_range[0], proximal_distance_range[1])
         noise_mz = base_mz + offset
         noise_mz = np.clip(noise_mz, mz_min, mz_max)
-
-        # Sample intensity (truncated normal)
+        
+        # 采样intensity（截断正态分布）
         noise_intensity = sample_truncated_normal(
             PROXIMAL_MEAN, PROXIMAL_STD, 0.001, 0.10
         ) * max_intensity
@@ -563,14 +560,14 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
         proximal_mz.append(noise_mz)
         proximal_intensity.append(noise_intensity)
     
-    # ===== 6. Generate isolated noise (regional weighting) =====
+    # ===== 6. 生成Isolated Noise（区域加权） =====
     isolated_mz = []
     isolated_intensity = []
-
+    
     if REGION_WEIGHTS:
-        # Use the regional-weighting strategy
+        # 使用区域加权策略
         for low, high, weight in REGION_WEIGHTS:
-            # Only generate within the spectrum's m/z range
+            # 只在光谱m/z范围内生成
             region_low = max(low, mz_min)
             region_high = min(high, mz_max)
             
@@ -585,11 +582,11 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
             while generated < n_in_region and attempts < max_attempts:
                 candidate_mz = np.random.uniform(region_low, region_high)
                 
-                # Check whether it is far from all signal peaks
+                # 检查是否远离所有signal peaks
                 min_dist = np.min(np.abs(signal_mz - candidate_mz))
-
+                
                 if min_dist >= isolated_min_distance:
-                    # Intensity is slightly higher in the 100-200 Da region
+                    # 100-200 Da区域intensity稍高
                     if 100 <= candidate_mz <= 200:
                         mean_adj = ISOLATED_MEAN * 1.1
                     else:
@@ -605,7 +602,7 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
                 
                 attempts += 1
     else:
-        # No regional weighting (original random strategy)
+        # 不使用区域加权（原始随机策略）
         attempts = 0
         max_attempts = n_isolated * 10
         generated = 0
@@ -625,25 +622,25 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
             
             attempts += 1
     
-    # ===== 7. Merge all peaks =====
+    # ===== 7. 合并所有peaks =====
     all_mz = np.concatenate([original_mz, proximal_mz, isolated_mz])
     all_intensity = np.concatenate([original_intensity, proximal_intensity, isolated_intensity])
-
-    # ===== 8. Convert back to token ids =====
+    
+    # ===== 8. 转换回token ids =====
     def mz_to_token(mz_val):
-        """Convert an m/z value to a token id (rounded to 0.01)."""
+        """将m/z值转换为token id（四舍五入到0.01精度）"""
         mz_rounded = round(mz_val, 2)
         mz_str = f"{mz_rounded:.2f}"
         return word2idx.get(mz_str, word2idx.get('[MASK]', 1))
     
     all_tokens = [mz_to_token(mz) for mz in all_mz]
     
-    # Sort by m/z
+    # 按m/z排序
     sorted_idx = np.argsort(all_mz)
     all_tokens = np.array(all_tokens)[sorted_idx]
     all_intensity = all_intensity[sorted_idx]
-
-    # ===== 9. Optional: filter and truncate =====
+    
+    # ===== 9. 可选：过滤和截断 =====
     filter_threshold = getattr(args, 'filter_threshold', None)
     if filter_threshold and filter_threshold > 0:
         max_int = all_intensity.max()
@@ -653,16 +650,16 @@ def augment_tokenized_ms2_optimized(mz_tokens, intensity, word2idx, args):
             all_tokens = all_tokens[mask]
             all_intensity = all_intensity[mask]
     
-    # Truncate to maxlen
+    # 截断到maxlen
     maxlen = getattr(args, 'maxlen', 100)
     if len(all_tokens) > maxlen:
-        # Keep the strongest peaks
+        # 保留最强的peaks
         top_indices = np.argsort(all_intensity)[-maxlen:]
-        top_indices = np.sort(top_indices)  # restore m/z order
+        top_indices = np.sort(top_indices)  # 恢复m/z顺序
         all_tokens = all_tokens[top_indices]
         all_intensity = all_intensity[top_indices]
-
-    # ===== 10. Convert back to tensor =====
+    
+    # ===== 10. 转换回tensor =====
     augmented_mz = torch.tensor(all_tokens, dtype=mz_tokens.dtype, device=device)
     augmented_intensity = torch.tensor(all_intensity, dtype=intensity.dtype, device=device).unsqueeze(0)
     
@@ -693,7 +690,7 @@ class MS2BioTextDataset(Dataset):
         self.text_assignment = {}
         self.ms2_ids = list(ms2_data.keys())
         self.word2idx = word2idx
-        self.args = args or argparse.Namespace()  # make sure it's not None
+        self.args = args or argparse.Namespace()  # 确保非None
         self.split = split
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -734,25 +731,25 @@ class MS2BioTextDataset(Dataset):
         return len(self.ms2_ids)
     
     def _create_mlm_inputs(self, input_ids):
-        """Create masked inputs and labels for the MLM task."""
+        """为MLM任务创建掩码输入和标签"""
         labels = input_ids.clone()
-        probability_matrix = torch.full(labels.shape, 0.15) # 15% mask probability
-
-        # Avoid masking special tokens (e.g., [CLS], [SEP], [PAD])
+        probability_matrix = torch.full(labels.shape, 0.15) # 15%的概率进行mask
+        
+        # 避免mask特殊tokens (e.g., [CLS], [SEP], [PAD])
         special_tokens_mask = self.tokenizer.get_special_tokens_mask(labels.tolist(), already_has_special_tokens=True)
         special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
-
+        
         probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
         masked_indices = torch.bernoulli(probability_matrix).bool()
-
-        # Set labels of un-masked tokens to -100 so they are ignored in the loss
+        
+        # 将未被mask的token的label设置为-100，这样在计算loss时会被忽略
         labels[~masked_indices] = -100
-
-        # 80% probability: replace with [MASK] token
+        
+        # 80% 的概率用 [MASK] token 替换
         indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
         input_ids[indices_replaced] = self.tokenizer.convert_tokens_to_ids(self.tokenizer.mask_token)
-
-        # 10% probability: replace with a random token
+        
+        # 10% 的概率用随机token替换
         indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
         random_words = torch.randint(len(self.tokenizer.vocab), labels.shape, dtype=torch.long)
         input_ids[indices_random] = random_words[indices_random]
@@ -776,7 +773,7 @@ class MS2BioTextDataset(Dataset):
             'intensity': tensor_data['intensity'].unsqueeze(0)
         }
         
-        # === Unified BioText handling logic ===
+        # === 统一的BioText处理逻辑 ===
         molecule_id = tensor_data['molecule_id']
         biotext = ""
         paraphrase_text = None
@@ -788,15 +785,15 @@ class MS2BioTextDataset(Dataset):
             if isinstance(entry, list):
                 all_candidate_texts = [record['text'] for record in entry]
                 
-                # *** Key change: use the text index assigned by the sampler ***
+                # *** 关键修改：使用sampler分配的text index ***
                 if ms2_id in self.text_assignment:
                     text_idx = self.text_assignment[ms2_id]
                     biotext = all_candidate_texts[text_idx]
                 else:
-                    # fallback: pick randomly (shouldn't happen in training)
+                    # fallback: 随机选择（shouldn't happen in training）
                     biotext = random.choice(entry)['text']
-
-                # Paraphrase: if needed, pick a different one from the remaining candidates
+                
+                # Paraphrase: 如果需要，从剩余的候选中选一个不同的
                 if self.use_paraphrase and len(entry) >= 2:
                     remaining_indices = [i for i in range(len(all_candidate_texts)) 
                                     if i != text_idx]
@@ -810,7 +807,7 @@ class MS2BioTextDataset(Dataset):
                 all_candidates = [original] + paraphrases
                 all_candidate_texts = all_candidates
                 
-                # *** Same logic ***
+                # *** 同样的逻辑 ***
                 if ms2_id in self.text_assignment:
                     text_idx = self.text_assignment[ms2_id]
                     biotext = all_candidates[text_idx]
@@ -829,7 +826,7 @@ class MS2BioTextDataset(Dataset):
         else:
             print(f"⚠️ Warning: Molecule ID '{molecule_id}' missing BioText")
 
-        # === Subsequent tokenization etc. remains unchanged ===
+        # === 后续tokenization等保持不变 ===
         encoded_text = self.tokenizer(
             biotext,
             padding="max_length",
@@ -875,54 +872,54 @@ class MS2BioTextDataset(Dataset):
     @staticmethod
     def custom_collate_fn(batch_list):
         """
-        Custom collate_fn for dict-style batch data.
-        Supports optional keys and filters hard negatives that conflict with batch positives.
+        自定义collate_fn，用于处理字典形式的批次数据。
+        支持可选的keys，并过滤与batch正样本冲突的hard negatives。
         """
         if not batch_list:
             return {}
-
-        # Collect molecule_id of all positives in the batch
+        
+        # 收集batch中所有正样本的molecule_id
         batch_molecule_ids = set()
         for sample in batch_list:
             if 'molecule_id' in sample:
                 batch_molecule_ids.add(sample['molecule_id'])
-
-        # Collect all possible keys
+        
+        # 收集所有可能的keys
         all_keys = set()
         for d in batch_list:
             all_keys.update(d.keys())
-
-        # Group data by key
+        
+        # 按key分组收集数据
         collated_batch = {}
         for key in all_keys:
             values = [d[key] for d in batch_list if key in d]
             collated_batch[key] = values
-
-        # === Filter conflicting hard negatives ===
+        
+        # === 过滤冲突的hard negatives ===
         if 'hard_neg_input_ids' in collated_batch and len(batch_molecule_ids) > 0:
             filtered_hard_neg_ids = []
             filtered_hard_neg_masks = []
             filtered_has_hard_neg = []
-
+            
             for i, sample in enumerate(batch_list):
                 if sample.get('has_hard_neg', False):
                     hard_neg_ids = sample['hard_neg_input_ids']  # [num_hard_neg, seq_len]
                     hard_neg_mask = sample['hard_neg_attention_mask']
                     hard_neg_mol_ids = sample.get('hard_neg_molecule_ids', [])
-
-                    # Find indices of hard negatives not in the batch
+                    
+                    # 找出不在batch中的hard negatives的索引
                     valid_indices = []
                     for j, neg_mol_id in enumerate(hard_neg_mol_ids):
                         if neg_mol_id not in batch_molecule_ids:
                             valid_indices.append(j)
                     
                     if valid_indices:
-                        # Keep only non-conflicting hard negatives
+                        # 只保留不冲突的hard negatives
                         filtered_hard_neg_ids.append(hard_neg_ids[valid_indices])
                         filtered_hard_neg_masks.append(hard_neg_mask[valid_indices])
                         filtered_has_hard_neg.append(True)
                     else:
-                        # All hard negatives conflict; use an empty tensor
+                        # 所有hard negatives都冲突，设为空tensor
                         max_length = sample['text_input_ids'].shape[0]
                         filtered_hard_neg_ids.append(
                             torch.zeros((0, max_length), dtype=torch.long)
@@ -932,7 +929,7 @@ class MS2BioTextDataset(Dataset):
                         )
                         filtered_has_hard_neg.append(False)
                 else:
-                    # No hard negatives to begin with
+                    # 原本就没有hard negatives
                     max_length = batch_list[0]['text_input_ids'].shape[0]
                     filtered_hard_neg_ids.append(
                         torch.zeros((0, max_length), dtype=torch.long)
@@ -946,76 +943,76 @@ class MS2BioTextDataset(Dataset):
             collated_batch['hard_neg_attention_mask'] = filtered_hard_neg_masks
             collated_batch['has_hard_neg'] = filtered_has_hard_neg
         
-        # Process keys one by one
+        # 逐个处理字典中的键值
         final_batch = {}
         for key, values in collated_batch.items():
-            # Optional boolean flags
+            # 可选的boolean flags
             if key in ['has_paraphrase', 'has_hard_neg']:
                 final_batch[key] = [d.get(key, False) for d in batch_list]
-
-            # Keys kept as lists (including the new hard_neg_molecule_ids)
+            
+            # 保持为list的keys（包括新增的hard_neg_molecule_ids）
             elif key in ['hard_neg_input_ids', 'hard_neg_attention_mask',
                         'paraphrase_input_ids', 'paraphrase_attention_mask',
                         'hard_neg_molecule_ids']:
                 final_batch[key] = values
-
-            # Stack tensors
+            
+            # 对张量进行堆叠
             elif isinstance(values[0], torch.Tensor):
                 if len(values) == len(batch_list):
                     final_batch[key] = torch.stack(values)
                 else:
                     final_batch[key] = values
-
-            # Keep other types as-is
+            
+            # 其他类型直接保留
             else:
                 final_batch[key] = values
-
+        
         return final_batch
-
+        
     @staticmethod
     def custom_collate_fn(batch_list):
         """
-        Custom collate_fn that identifies sample pairs with overlapping texts within a batch.
+        自定义collate_fn，识别batch中有text overlap的样本对
         """
         if not batch_list:
             return {}
-
+        
         batch_size = len(batch_list)
-
-        # Collect molecule_id of all positives in the batch
+        
+        # 收集batch中所有正样本的molecule_id
         batch_molecule_ids = set()
         for sample in batch_list:
             if 'molecule_id' in sample:
                 batch_molecule_ids.add(sample['molecule_id'])
-
-        # === NEW: build the text-overlap matrix ===
-        # text_overlap[i][j] = 1 means sample i and sample j share at least one candidate text
+        
+        # === NEW: 构建text overlap矩阵 ===
+        # text_overlap[i][j] = 1 表示样本i和样本j有共享的候选text
         text_overlap = torch.zeros(batch_size, batch_size, dtype=torch.float32)
-
+        
         for i in range(batch_size):
             for j in range(batch_size):
                 if i == j:
-                    text_overlap[i, j] = 1.0  # a sample always overlaps with itself
+                    text_overlap[i, j] = 1.0  # 自己和自己肯定overlap
                 else:
-                    # Check whether the candidate text sets intersect
+                    # 检查候选text集合是否有交集
                     texts_i = set(batch_list[i].get('all_candidate_texts', []))
                     texts_j = set(batch_list[j].get('all_candidate_texts', []))
-
-                    if texts_i & texts_j:  # intersection is non-empty
+                    
+                    if texts_i & texts_j:  # 有交集
                         text_overlap[i, j] = 1.0
-
-        # Collect all possible keys
+        
+        # 收集所有可能的keys
         all_keys = set()
         for d in batch_list:
             all_keys.update(d.keys())
-
-        # Group data by key
+        
+        # 按key分组收集数据
         collated_batch = {}
         for key in all_keys:
             values = [d[key] for d in batch_list if key in d]
             collated_batch[key] = values
-
-        # === Filter conflicting hard negatives ===
+        
+        # === 过滤冲突的hard negatives ===
         if 'hard_neg_input_ids' in collated_batch and len(batch_molecule_ids) > 0:
             filtered_hard_neg_ids = []
             filtered_hard_neg_masks = []
@@ -1059,14 +1056,14 @@ class MS2BioTextDataset(Dataset):
             collated_batch['hard_neg_attention_mask'] = filtered_hard_neg_masks
             collated_batch['has_hard_neg'] = filtered_has_hard_neg
         
-        # Process keys one by one
+        # 逐个处理字典中的键值
         final_batch = {}
         for key, values in collated_batch.items():
             if key in ['has_paraphrase', 'has_hard_neg']:
                 final_batch[key] = [d.get(key, False) for d in batch_list]
             elif key in ['hard_neg_input_ids', 'hard_neg_attention_mask',
                         'paraphrase_input_ids', 'paraphrase_attention_mask',
-                        'hard_neg_molecule_ids', 'all_candidate_texts']:  # keep all_candidate_texts as a list
+                        'hard_neg_molecule_ids', 'all_candidate_texts']:  # all_candidate_texts保持list
                 final_batch[key] = values
             elif isinstance(values[0], torch.Tensor):
                 if len(values) == len(batch_list):
@@ -1075,31 +1072,31 @@ class MS2BioTextDataset(Dataset):
                     final_batch[key] = values
             else:
                 final_batch[key] = values
-
-        # === Attach text_overlap info ===
+        
+        # === 添加text_overlap信息 ===
         final_batch['text_overlap_matrix'] = text_overlap  # [batch_size, batch_size]
-
+        
         return final_batch
 
-
+            
     @staticmethod
     def load_hmdb_data_subsections(first_path, second_path, jsonl_path, max_text_sharing=5):
         """
-        Load data using the subsections JSONL format and filter highly-shared texts.
-
-        Args:
-            first_path (str): MS2 data file path (h5, pkl, ...)
-            second_path (str): metadata file path (parquet, csv, ...)
-            jsonl_path (str): BioText JSONL file path
-            max_text_sharing (int): drop any text shared by more than this many molecules
-
-        Returns:
-            tuple: (ms2_data, meta_data, biotext_data)
-                biotext_data format: {molecule_id: [{'type': 'xxx', 'text': 'xxx'}, ...]}
+        使用subsections JSONL格式读取数据，并过滤高频共享的text
+        
+        参数:
+        first_path (str): MS2数据文件路径（h5、pkl等）
+        second_path (str): Meta数据文件路径（parquet、csv等）
+        jsonl_path (str): BioText的jsonl文件路径
+        max_text_sharing (int): text最多可以被多少个molecule共享，超过则删除
+        
+        返回:
+        tuple: (ms2_data, meta_data, biotext_data)
+            biotext_data格式: {molecule_id: [{'type': 'xxx', 'text': 'xxx'}, ...]}
         """
         from collections import defaultdict
-
-        # Read MS2 data
+        
+        # 读取MS2数据
         ms2_data = {}
         try:
             _, ext1 = os.path.splitext(first_path)
@@ -1125,7 +1122,7 @@ class MS2BioTextDataset(Dataset):
             print(f"Error: Failed to read first file: {first_path}. Error message: {str(e)}")
             return None, None, None
 
-        # Read metadata
+        # 读取Meta数据
         meta_data = None
         try:
             _, ext2 = os.path.splitext(second_path)
@@ -1140,7 +1137,7 @@ class MS2BioTextDataset(Dataset):
             print(f"Error: Failed to read second file: {second_path}. Error message: {str(e)}")
             return ms2_data, None, None
 
-        # Read the BioText JSONL file
+        # 读取 BioText JSONL 文件
         biotext_data = {}
         try:
             import json
@@ -1166,20 +1163,20 @@ class MS2BioTextDataset(Dataset):
             print(f"Error reading BioText JSONL: {e}")
             return ms2_data, meta_data, None
 
-        # ===== Filter highly-shared texts =====
+        # ===== 过滤高频共享的text =====
         print(f"\n=== Filtering texts shared by >{max_text_sharing} molecules ===")
-
-        # 1. Build inverted index: text -> molecules
+        
+        # 1. 构建text -> molecules的倒排索引
         text_to_molecules = defaultdict(set)
         for mol_id, records in biotext_data.items():
             for record in records:
                 text = record['text']
-                if text:  # skip empty strings
+                if text:  # 避免空字符串
                     text_to_molecules[text].add(mol_id)
-
-        # 2. Find texts to remove based on sharing frequency
+        
+        # 2. 找出需要删除的高频text
         texts_to_remove = set()
-        sharing_distribution = defaultdict(int)  # distribution counts
+        sharing_distribution = defaultdict(int)  # 统计分布
         
         for text, molecules in text_to_molecules.items():
             sharing_count = len(molecules)
@@ -1194,7 +1191,7 @@ class MS2BioTextDataset(Dataset):
         
         print(f"\nFound {len(texts_to_remove)} texts to remove (shared by >{max_text_sharing} molecules)")
         
-        # 3. Remove these high-frequency texts from each molecule's candidate list
+        # 3. 从每个molecule的候选text中删除这些高频text
         filtered_biotext_data = {}
         total_removed = 0
         molecules_with_no_text = []
@@ -1210,7 +1207,7 @@ class MS2BioTextDataset(Dataset):
                 molecules_with_no_text.append(mol_id)
                 total_removed += len(records)
         
-        # 4. Statistics
+        # 4. 统计信息
         print(f"\nFiltering results:")
         print(f"  Text entries removed: {total_removed}")
         print(f"  Molecules before: {len(biotext_data)}")
@@ -1224,7 +1221,7 @@ class MS2BioTextDataset(Dataset):
             else:
                 print(f"    First 5: {molecules_with_no_text[:5]}")
         
-        # 5. Verify filtering results
+        # 5. 验证过滤效果
         text_to_molecules_after = defaultdict(set)
         for mol_id, records in filtered_biotext_data.items():
             for record in records:
@@ -1241,10 +1238,10 @@ class MS2BioTextDataset(Dataset):
         total_records_after = sum(len(v) for v in filtered_biotext_data.values())
         print(f"  Total records (after filtering): {total_records_after}, Avg per molecule: {total_records_after / len(filtered_biotext_data):.1f}")
         
-        # Use the filtered data
+        # 使用过滤后的数据
         biotext_data = filtered_biotext_data
 
-        # Print statistics
+        # 打印统计
         unique_molecule_ids = set(item['molecule_id'] for item in ms2_data.values())
         print(f"\nFinal data summary:")
         print(f"  Unique molecule IDs in MS2 data: {len(unique_molecule_ids)}")
@@ -1284,18 +1281,18 @@ class MS2BioTextDataset(Dataset):
     @staticmethod
     def add_noise_peaks(peaks, intensities, noise_ratio=0.5, noise_intensity_range=(0.001, 0.05), seed=None):
         """
-        Add random noise peaks to simulate external data.
-
+        添加随机noise peaks来模拟外部数据
+        
         Args:
-            peaks: list of float, original m/z values
-            intensities: list of float, original intensity values
-            noise_ratio: float, noise peak count = original peak count * noise_ratio
-            noise_intensity_range: tuple, noise intensity range (relative to max intensity)
-            seed: int, optional random seed
-
+            peaks: list of float, 原始m/z值
+            intensities: list of float, 原始强度值
+            noise_ratio: float, 添加的noise peaks数量 = 原peaks数 × noise_ratio
+            noise_intensity_range: tuple, noise的相对强度范围（相对于max intensity）
+            seed: int, 随机种子（可选）
+        
         Returns:
-            aug_peaks: list of float, m/z after adding noise
-            aug_intensities: list of float, intensities after adding noise
+            aug_peaks: list of float, 添加noise后的m/z
+            aug_intensities: list of float, 添加noise后的强度
         """
         import numpy as np
         import random
@@ -1311,27 +1308,27 @@ class MS2BioTextDataset(Dataset):
         if max_int == 0:
             return peaks, intensities
         
-        # Compute the number of noise peaks to add
+        # 计算要添加的noise数量
         n_noise = int(len(peaks) * noise_ratio)
         if n_noise == 0:
             return peaks, intensities
-
-        # Randomly generate noise m/z values within the spectrum's range
+        
+        # 在光谱范围内随机生成noise peaks的m/z
         mz_min, mz_max = min(peaks), max(peaks)
         noise_mz = np.random.uniform(mz_min, mz_max, n_noise).tolist()
-
-        # Generate low-intensity noise (relative to max intensity)
+        
+        # 生成低强度noise（相对于max intensity）
         noise_int = np.random.uniform(
             noise_intensity_range[0] * max_int,
             noise_intensity_range[1] * max_int,
             n_noise
         ).tolist()
         
-        # Merge original peaks and noise
+        # 合并原始peaks和noise
         aug_peaks = peaks + noise_mz
         aug_intensities = intensities + noise_int
-
-        # Sort by m/z
+        
+        # 按m/z排序
         sorted_indices = sorted(range(len(aug_peaks)), key=lambda i: aug_peaks[i])
         aug_peaks = [aug_peaks[i] for i in sorted_indices]
         aug_intensities = [aug_intensities[i] for i in sorted_indices]
@@ -1342,13 +1339,13 @@ class MS2BioTextDataset(Dataset):
     @staticmethod
     def filter_low_intensity_peaks(peaks, intensities, threshold=0.01):
         """
-        Filter out low-intensity peaks.
-
+        过滤低强度peaks
+        
         Args:
-            peaks: list of float, m/z values
-            intensities: list of float, intensity values
-            threshold: float, relative intensity threshold (0.01 = 1%)
-
+            peaks: list of float, m/z值
+            intensities: list of float, 强度值
+            threshold: float, 相对强度阈值（0.01 = 1%）
+        
         Returns:
             filtered_peaks: list of float
             filtered_intensities: list of float
@@ -1360,7 +1357,7 @@ class MS2BioTextDataset(Dataset):
         if max_int == 0:
             return peaks, intensities
         
-        # Normalize and filter
+        # 归一化并过滤
         norm_intensities = [i / max_int for i in intensities]
         filtered_peaks = []
         filtered_intensities = []
@@ -1376,23 +1373,23 @@ class MS2BioTextDataset(Dataset):
     @staticmethod
     def augment_ms2_data(ms2_data, args):
         """
-        Augment MS2 data (must be called before preprocess).
-
+        对MS2数据进行增强（必须在preprocess之前调用）
+        
         Args:
             ms2_data: dict, {ms2_id: {'mz': list, 'intensity': list, 'molecule_id': str}}
-                    Note: mz and intensity must be raw floats, not token_ids.
-            args: argparse.Namespace with augmentation parameters:
-                - augment_noise: bool, whether to add noise augmentation (default: False)
-                - augment_multiplier: int, how many versions per spectrum (1 = no augmentation, 2 = 2x data)
-                - noise_ratio: float, noise count = original peak count * noise_ratio
-                - noise_intensity_range: tuple, noise intensity range (relative to max intensity)
-                - filter_threshold: float or None, threshold for filtering low-intensity peaks
-
+                    注意：mz和intensity必须是原始的float值，不能是token_ids
+            args: argparse.Namespace, 包含增强参数:
+                - augment_noise: bool, 是否添加noise增强 (default: False)
+                - augment_multiplier: int, 每个光谱生成几个版本 (1=不增强, 2=生成2倍数据)
+                - noise_ratio: float, 添加的noise数量 = 原peaks数 × noise_ratio
+                - noise_intensity_range: tuple, noise强度范围 (相对于max intensity)
+                - filter_threshold: float or None, 过滤低强度peaks的阈值
+        
         Returns:
-            augmented_ms2_data: dict containing original + augmented versions
-                            augment_multiplier=1 -> returns the original data
-                            augment_multiplier=2 -> returns 2x data (original + 1 augmented version)
-
+            augmented_ms2_data: dict, 包含原始+增强版本的数据
+                            如果augment_multiplier=1，返回原始数据
+                            如果augment_multiplier=2，返回2倍数据（原始+1个增强版本）
+        
         Example:
             >>> augmented_data = MS2BioTextDataset.augment_ms2_data(ms2_data, args)
             >>> processed_data, word2idx = MS2BioTextDataset.preprocess_ms2_data_positive_only(
@@ -1400,76 +1397,76 @@ class MS2BioTextDataset(Dataset):
             ... )
         """
         import numpy as np
-
-        # Read parameters (gracefully handle missing ones)
+        
+        # 获取参数（兼容没有这些参数的情况）
         augment_noise = getattr(args, 'augment_noise', False)
         augment_multiplier = getattr(args, 'augment_multiplier', 1)
         noise_ratio = getattr(args, 'noise_ratio', 0.5)
         noise_intensity_range = getattr(args, 'noise_intensity_range', (0.001, 0.05))
         filter_threshold = getattr(args, 'filter_threshold', None)
-
-        # If augmentation is disabled, return the original data
+        
+        # 如果不需要增强，直接返回原数据
         if not augment_noise or augment_multiplier <= 1:
-            print("Info: data augmentation not enabled (augment_noise=False or augment_multiplier<=1)")
+            print("ℹ️  未启用数据增强 (augment_noise=False or augment_multiplier<=1)")
             return ms2_data
-
+        
         print(f"\n{'='*60}")
-        print(f"MS2 data augmentation")
+        print(f"🔄 MS2数据增强")
         print(f"{'='*60}")
-        print(f"  Multiplier: {augment_multiplier}x")
-        print(f"  Noise ratio: {noise_ratio}")
-        print(f"  Noise intensity range: {noise_intensity_range}")
+        print(f"  增强倍数: {augment_multiplier}x")
+        print(f"  Noise比例: {noise_ratio}")
+        print(f"  Noise强度范围: {noise_intensity_range}")
         if filter_threshold:
-            print(f"  Filter threshold: {filter_threshold} (relative intensity)")
-        print(f"  Original spectra: {len(ms2_data)}")
-
+            print(f"  过滤阈值: {filter_threshold} (相对强度)")
+        print(f"  原始光谱数: {len(ms2_data)}")
+        
         augmented_ms2_data = {}
-
+        
         for ms2_id, info in ms2_data.items():
             molecule_id = info.get('molecule_id')
-
-            # Check data format
+            
+            # 检查数据格式
             if not isinstance(info['mz'], list) or not isinstance(info['intensity'], list):
-                print(f"Skipping {ms2_id}: mz or intensity is not a list")
+                print(f"⚠️  跳过 {ms2_id}: mz或intensity不是list格式")
                 continue
-
-            # Version 0: original data (optionally filtered)
+            
+            # 版本0: 原始数据（可选过滤）
             peaks_original = info['mz'].copy() if isinstance(info['mz'], list) else list(info['mz'])
             intensities_original = info['intensity'].copy() if isinstance(info['intensity'], list) else list(info['intensity'])
-
-            # Optional: filter low-intensity peaks
+            
+            # 可选：过滤低强度peaks
             if filter_threshold is not None and filter_threshold > 0:
                 peaks_original, intensities_original = MS2BioTextDataset.filter_low_intensity_peaks(
                     peaks_original, intensities_original, threshold=filter_threshold
                 )
-
-            # Save the original version
+            
+            # 保存原始版本
             augmented_ms2_data[ms2_id] = {
                 'mz': peaks_original,
                 'intensity': intensities_original,
                 'molecule_id': molecule_id
             }
-
-            # Generate augmented versions (1..N-1)
+            
+            # 生成增强版本（版本1到N-1）
             for aug_idx in range(1, augment_multiplier):
                 peaks_aug, intensities_aug = MS2BioTextDataset.add_noise_peaks(
                     peaks_original.copy(),
                     intensities_original.copy(),
                     noise_ratio=noise_ratio,
                     noise_intensity_range=noise_intensity_range,
-                    seed=None  # generate different noise each time
+                    seed=None  # 每次随机生成不同的noise
                 )
-
-                # New id: original id + suffix
+                
+                # 新的ID：原ID + 后缀
                 aug_ms2_id = f"{ms2_id}_aug{aug_idx}"
                 augmented_ms2_data[aug_ms2_id] = {
                     'mz': peaks_aug,
                     'intensity': intensities_aug,
-                    'molecule_id': molecule_id  # keep the same molecule_id!
+                    'molecule_id': molecule_id  # 保持相同的molecule_id！
                 }
-
-        print(f"  Augmented spectra: {len(augmented_ms2_data)}")
-        print(f"  Generated versions: {len(augmented_ms2_data) - len(ms2_data)}")
+        
+        print(f"  ✓ 增强后光谱数: {len(augmented_ms2_data)}")
+        print(f"  增强版本数: {len(augmented_ms2_data) - len(ms2_data)}")
         print(f"{'='*60}\n")
         
         return augmented_ms2_data
@@ -1490,31 +1487,31 @@ class MS2BioTextDataset(Dataset):
         - word2idx: dict, maps string-formatted m/z values to token indices
         """
         
-        # ===== Helper to safely convert precursor_mass =====
+        # ===== 新增：安全转换precursor_mass的函数 =====
         def safe_convert_precursor(value):
-            """Safely convert a precursor_mass value, handling malformed formats."""
+            """安全转换precursor_mass值，处理异常格式"""
             if pd.isna(value):
                 return None
-
-            # Already numeric
+            
+            # 如果已经是数字
             if isinstance(value, (int, float)):
                 return float(value)
-
-            # String case
+            
+            # 如果是字符串
             value_str = str(value).strip()
-
-            # Handle empty strings
+            
+            # 处理空字符串
             if value_str == '' or value_str.lower() == 'nan':
                 return None
-
-            # Handle the "209/192" format (take the first value)
+            
+            # 处理 "209/192" 这种格式（取第一个值）
             if '/' in value_str:
                 try:
                     return float(value_str.split('/')[0])
                 except:
                     return None
-
-            # Try direct conversion
+            
+            # 尝试直接转换
             try:
                 return float(value_str)
             except:
@@ -1533,7 +1530,7 @@ class MS2BioTextDataset(Dataset):
         # 3) Initialize output dictionary
         ms_data = {}
         
-        # ===== Statistics =====
+        # ===== 新增：统计信息 =====
         filter_stats = {
             'total': 0,
             'empty_mz': 0,
@@ -1542,7 +1539,7 @@ class MS2BioTextDataset(Dataset):
             'no_precursor': 0,
             'precursor_gt_1000': 0,
             'no_peaks_after_filter': 0,
-            'too_few_peaks': 0,
+            'too_few_peaks': 0,  # 新增
             'kept': 0
         }
         # ===========================
@@ -1576,7 +1573,7 @@ class MS2BioTextDataset(Dataset):
                 filter_stats['no_meta'] += 1
                 continue
             
-            # ===== Use the safe converter =====
+            # ===== 修改：使用安全转换函数 =====
             precursor_val = safe_convert_precursor(row['precursor_mass'].values[0])
             if precursor_val is None:
                 filter_stats['no_precursor'] += 1
@@ -1594,7 +1591,7 @@ class MS2BioTextDataset(Dataset):
                 if mz_val <= 1000:
                     peaks_str.append("%.2f" % mz_val)
             
-            # ===== Check peak count =====
+            # ===== 新增：检查peaks数量 =====
             if len(peaks_str) == 0:
                 filter_stats['no_peaks_after_filter'] += 1
                 continue
@@ -1632,19 +1629,19 @@ class MS2BioTextDataset(Dataset):
             }
             filter_stats['kept'] += 1
         
-        # ===== Print statistics =====
-        print(f"\nPreprocessing statistics:")
-        print(f"  Total spectra: {filter_stats['total']}")
-        print(f"  Filtered out:")
-        print(f"    Empty M/Z: {filter_stats['empty_mz']}")
-        print(f"    Non-Positive: {filter_stats['not_positive']}")
-        print(f"    No meta: {filter_stats['no_meta']}")
-        print(f"    No/invalid precursor: {filter_stats['no_precursor']}")
+        # ===== 新增：打印统计信息 =====
+        print(f"\n预处理统计:")
+        print(f"  总光谱: {filter_stats['total']}")
+        print(f"  过滤:")
+        print(f"    空M/Z: {filter_stats['empty_mz']}")
+        print(f"    非Positive: {filter_stats['not_positive']}")
+        print(f"    无meta: {filter_stats['no_meta']}")
+        print(f"    无/异常precursor: {filter_stats['no_precursor']}")
         print(f"    precursor>1000: {filter_stats['precursor_gt_1000']}")
-        print(f"    All peaks>1000: {filter_stats['no_peaks_after_filter']}")
+        print(f"    所有peaks>1000: {filter_stats['no_peaks_after_filter']}")
         if min_peaks > 0:
             print(f"    peaks<{min_peaks}: {filter_stats['too_few_peaks']}")
-        print(f"  Kept: {filter_stats['kept']} ({filter_stats['kept']/filter_stats['total']*100:.2f}%)")
+        print(f"  ✓ 保留: {filter_stats['kept']} ({filter_stats['kept']/filter_stats['total']*100:.2f}%)")
         # ================================
         
         # 5) Return processed data and dictionary
@@ -1653,7 +1650,7 @@ class MS2BioTextDataset(Dataset):
 
     @staticmethod
     def augment_ms2_data_parallel(ms2_data, args, n_workers=None):
-        """Multiprocess version of augment_ms2_data."""
+        """多进程版本的augment_ms2_data"""
         from multiprocessing import Pool, cpu_count
         
         if n_workers is None:
@@ -1663,34 +1660,34 @@ class MS2BioTextDataset(Dataset):
         augment_multiplier = getattr(args, 'augment_multiplier', 1)
         
         if not augment_noise or augment_multiplier <= 1:
-            print("Info: data augmentation not enabled")
+            print("ℹ️  未启用数据增强")
             return ms2_data
-
-        print(f"\nMultiprocess data augmentation (workers={n_workers})...")
-
-        # Prepare arguments
+        
+        print(f"\n🚀 多进程数据增强 (workers={n_workers})...")
+        
+        # 准备参数
         items = list(ms2_data.items())
         chunk_size = max(1, len(items) // (n_workers * 4))
-
-        # Extract parameters
+        
+        # 提取参数
         filter_threshold = getattr(args, 'filter_threshold', None)
         noise_ratio = getattr(args, 'noise_ratio', 0.5)
         noise_intensity_range = getattr(args, 'noise_intensity_range', (0.001, 0.05))
-
-        # Split into batches and pack arguments
+        
+        # 分批并打包参数
         batches = [items[i:i+chunk_size] for i in range(0, len(items), chunk_size)]
-        batch_data = [(batch, filter_threshold, noise_ratio, noise_intensity_range, augment_multiplier)
+        batch_data = [(batch, filter_threshold, noise_ratio, noise_intensity_range, augment_multiplier) 
                       for batch in batches]
-
+        
         with Pool(n_workers) as pool:
             results = pool.map(_augment_worker, batch_data)
-
-        # Merge results
+        
+        # 合并结果
         augmented_data = {}
         for r in results:
             augmented_data.update(r)
-
-        print(f"  Done: {len(augmented_data)} spectra")
+        
+        print(f"  ✓ 完成: {len(augmented_data)} 光谱")
         return augmented_data
     
 
@@ -1698,16 +1695,16 @@ class MS2BioTextDataset(Dataset):
     def preprocess_ms2_data_positive_only_parallel(ms2_data, meta_data, maxlen=100, min_peaks=0, n_workers=None,
                                                     precursor_mode='normalize_add', precursor_value=2.0):
         """
-        Multiprocess version of preprocess.
-
+        多进程版本的preprocess
+        
         Args:
-            precursor_mode:
-                - 'scale_fixed': scale fragments to precursor_value (e.g. 20000); precursor fixed at 2
-                - 'normalize_add': normalize fragments to 1, set precursor to precursor_value (e.g. 2.0), then normalize again
-                - 'original': original MSBERT method
-            precursor_value:
-                - when mode='scale_fixed': target value to scale fragments to (default 20000)
-                - when mode='normalize_add': precursor intensity value (default 2.0)
+            precursor_mode: 
+                - 'scale_fixed': 缩放fragments到precursor_value（如20000），precursor固定为2
+                - 'normalize_add': 归一化fragments到1，precursor用precursor_value（如2.0），再整体归一化
+                - 'original': 原始MSBERT方式
+            precursor_value: 
+                - mode='scale_fixed'时: fragments缩放的目标值（默认20000）
+                - mode='normalize_add'时: precursor的强度值（默认2.0）
         """
         from multiprocessing import Pool, cpu_count
         import numpy as np
@@ -1716,37 +1713,37 @@ class MS2BioTextDataset(Dataset):
         if n_workers is None:
             n_workers = min(cpu_count() - 1, 8)
         
-        print(f"\nMultiprocess preprocessing (workers={n_workers}, mode={precursor_mode}, value={precursor_value})...")
-
-        # Build word2idx
+        print(f"\n🚀 多进程预处理 (workers={n_workers}, mode={precursor_mode}, value={precursor_value})...")
+        
+        # 构建word2idx
         word_list = list(np.round(np.linspace(0, 1000, 100*1000, endpoint=False), 2))
         word_list = ["%.2f" % i for i in word_list]
         word2idx = {'[PAD]': 0, '[MASK]': 1}
         for i, w in enumerate(word_list):
             word2idx[w] = i + 2
         
-        # Preprocess meta_data
+        # 预处理 meta_data
         meta_data_processed = meta_data.copy()
         if "Polarity" in meta_data_processed.columns:
             meta_data_processed["Polarity"] = meta_data_processed["Polarity"].astype(str).str.lower().str.strip()
-
-        # Compute the maximum number of fragments
+        
+        # 计算最大碎片数
         max_frag = max(0, min(100, maxlen - 1))
-
-        # Prepare data
+        
+        # 准备数据
         items = list(ms2_data.items())
         chunk_size = max(1, len(items) // (n_workers * 4))
-
-        # Split into batches and pack arguments
+        
+        # 分批并打包参数
         batches = [items[i:i+chunk_size] for i in range(0, len(items), chunk_size)]
-        batch_data = [(batch, word2idx, meta_data_processed, maxlen, max_frag, min_peaks,
+        batch_data = [(batch, word2idx, meta_data_processed, maxlen, max_frag, min_peaks, 
                     precursor_mode, precursor_value)
                     for batch in batches]
-
+        
         with Pool(n_workers) as pool:
             results = pool.map(_preprocess_worker, batch_data)
-
-        # Merge
+        
+        # 合并
         ms_data = {}
         total_kept = 0
         total_filtered = 0
@@ -1754,8 +1751,8 @@ class MS2BioTextDataset(Dataset):
             ms_data.update(r)
             total_kept += stats['kept']
             total_filtered += stats['filtered']
-
-        print(f"  Done: {total_kept}/{len(items)} spectra (filtered: {total_filtered})")
+        
+        print(f"  ✓ 完成: {total_kept}/{len(items)} 光谱 (过滤: {total_filtered})")
         return ms_data, word2idx
 
     @staticmethod
@@ -2004,17 +2001,17 @@ class MS2BioTextDataset(Dataset):
         # 3) Initialize output dictionary
         ms_data = {}
 
-        # Precompute: positive-ion detection is more robust after lower+strip
+        # 预计算：正离子模式的判定更稳健（lower+strip）
         if "Polarity" in meta_data.columns:
             meta_data = meta_data.copy()
             meta_data["Polarity"] = meta_data["Polarity"].astype(str).str.lower().str.strip()
 
-        # Max allowed fragment count (precursor + fragments <= maxlen)
+        # 允许的最大碎片数（保证前体+碎片 <= maxlen）
         max_frag = max(0, min(100, maxlen - 1))
 
         # 4) Iterate through each ms2_id
         for ms2_id, info in ms2_data.items():
-            # Basic checks
+            # 基础检查
             if not info.get('mz'):
                 continue
 
@@ -2022,10 +2019,10 @@ class MS2BioTextDataset(Dataset):
             intensities = np.asarray(info['intensity'], dtype=float)
             molecule_id = info.get('molecule_id', None)
 
-            # 4.0 Use the row matching the filename for polarity
+            # 4.0 文件名对应行用于极性判断
             specific_row = meta_data.loc[meta_data["file_name"] == ms2_id] if "file_name" in meta_data.columns else pd.DataFrame()
             if specific_row.empty:
-                # If not found, try locating a row by molecule_id (best effort)
+                # 若找不到，就尽量用 molecule_id 定位一行（不强制）
                 if molecule_id is not None:
                     if 'HMDB.ID' in meta_data.columns:
                         specific_row = meta_data.loc[meta_data['HMDB.ID'] == molecule_id]
@@ -2034,7 +2031,7 @@ class MS2BioTextDataset(Dataset):
             if specific_row.empty:
                 continue
 
-            # Keep positive-ion only
+            # 只保留正离子
             pol = str(specific_row["Polarity"].values[0]).lower().strip() if "Polarity" in specific_row.columns else ""
             if pol != "positive":
                 continue
@@ -2053,15 +2050,15 @@ class MS2BioTextDataset(Dataset):
             except Exception:
                 continue
 
-            # Precursor range [10, 1000); also guard against 1000.00 going out of range after formatting
+            # 前体范围 [10, 1000)；并避免 1000.00 被格式化后越界
             if pd.isna(precursor_val) or (precursor_val < 10.0) or (precursor_val >= 1000.0):
                 continue
             precursor_val = min(precursor_val, 999.99)
             precursor_str = "%.2f" % precursor_val
 
-            # 4.2 Filter peaks to [10, 1000)
+            # 4.2 过滤峰到 [10, 1000)
             if peaks.shape[0] != intensities.shape[0]:
-                # Mismatched lengths: skip (alternatively truncate to the shorter)
+                # 长度不一致直接跳过（也可选择截断到对齐最短）
                 n = min(len(peaks), len(intensities))
                 peaks = peaks[:n]
                 intensities = intensities[:n]
@@ -2073,35 +2070,35 @@ class MS2BioTextDataset(Dataset):
             if peaks.size == 0:
                 continue
 
-            # 4.3 Pick Top-K fragments by intensity (at most 100; precursor + fragments <= maxlen)
+            # 4.3 按强度选 Top-K 碎片（最多 100，且保证前体+碎片 <= maxlen）
             if peaks.size > max_frag:
                 idx = np.argpartition(intensities, -max_frag)[-max_frag:]
-                # After selection, sort by m/z ascending (sorting by intensity desc is also fine)
+                # 选完后按 m/z 升序排序（也可按强度降序，看你需求）
                 order = np.argsort(peaks[idx])
                 idx = idx[order]
                 peaks_sel = peaks[idx]
                 intens_sel = intensities[idx]
             else:
-                # Just sort by m/z ascending
+                # 直接按 m/z 升序
                 order = np.argsort(peaks)
                 peaks_sel = peaks[order]
                 intens_sel = intensities[order]
 
-            # 4.4 Build the token sequence (precursor first)
+            # 4.4 构建 token 序列（前体在最前）
             peaks_str = ["%.2f" % p for p in peaks_sel]
             try:
                 token_ids = [word2idx[precursor_str]] + [word2idx[p] for p in peaks_str]
             except KeyError:
-                # Should not happen (we already clamp to [10, 999.99]), but guard anyway
+                # 理论上不会发生（我们已限制到 [10, 999.99]），但以防万一
                 continue
 
-            # 4.5 Intensities: prepend 2 and normalize the whole sequence (matches existing logic)
+            # 4.5 强度：在最前 prepend 2，并按你原有逻辑整体归一化
             intens_seq = np.hstack((2.0, intens_sel))
             max_intensity = float(np.max(intens_seq)) if intens_seq.size else 1.0
             if max_intensity != 0.0:
                 intens_seq = intens_seq / max_intensity
 
-            # 4.6 Pad or truncate to maxlen (strictly align the two sequences)
+            # 4.6 Pad 或截断到 maxlen（双序列严格对齐）
             if len(token_ids) > maxlen:
                 token_ids = token_ids[:maxlen]
                 intens_seq = intens_seq[:maxlen]
@@ -2134,28 +2131,28 @@ class MS2BioTextDataset(Dataset):
         **kwargs
     ):
         """
-        Load and process external test datasets (e.g., HILIC and RPLC).
-
-        Args:
-            external_data_dir (str): path to the external data directory
-            biotext_dir (str): directory of BioText text files
-            paraphrase_dir (str): directory of paraphrase text files
-            tokenizer: text tokenizer
-            args: args object containing preprocessing parameters (precursor_mode, precursor_value, n_workers, ...)
-            dataset_configs (list): list of dataset configs, each with name, ms2_file, meta_file
-            **kwargs: additional arguments passed to the MS2BioTextDataset constructor
-
-        Returns:
-            tuple: (external_test_dataset, data_statistics)
-                - external_test_dataset: MS2BioTextDataset instance
-                - data_statistics: dict with data statistics
+        加载并处理外部测试数据集（如HILIC和RPLC）
+        
+        参数:
+        external_data_dir (str): 外部数据目录路径
+        biotext_dir (str): BioText文本文件目录
+        paraphrase_dir (str): Paraphrase文本文件目录
+        tokenizer: 文本tokenizer
+        args: 包含预处理参数的args对象（precursor_mode, precursor_value, n_workers等）
+        dataset_configs (list): 数据集配置列表，每个配置包含name, ms2_file, meta_file
+        **kwargs: 传递给MS2BioTextDataset构造函数的其他参数
+        
+        返回:
+        tuple: (external_test_dataset, data_statistics)
+            - external_test_dataset: MS2BioTextDataset实例
+            - data_statistics: 包含数据统计信息的字典
         """
         import pickle
         import pandas as pd
         import os
         from pathlib import Path
-
-        # Default config (HILIC and RPLC)
+        
+        # 默认配置（HILIC和RPLC）
         if dataset_configs is None:
             dataset_configs = [
                 {
@@ -2171,30 +2168,30 @@ class MS2BioTextDataset(Dataset):
             ]
         
         print("\n" + "="*60)
-        print("Loading external test datasets...")
+        print("加载外部测试数据集...")
         print("="*60)
-
-        # 1. Load every dataset
+        
+        # 1. 加载所有数据集
         all_ms2_data = {}
         all_meta_data = []
-
+        
         for config in dataset_configs:
-            print(f"\nLoading {config['name']} dataset...")
-
-            # Load MS2 data
+            print(f"\n📁 加载 {config['name']} 数据集...")
+            
+            # 加载MS2数据
             with open(config['ms2_file'], 'rb') as f:
                 ms2_data = pickle.load(f)
-
-            # Load metadata
+            
+            # 加载Meta数据
             meta_data = pd.read_csv(config['meta_file'])
-
-            print(f"  {config['name']}: {len(ms2_data)} spectra, {len(meta_data)} meta")
-
-            # Merge MS2
+            
+            print(f"  ✓ {config['name']}: {len(ms2_data)} 光谱, {len(meta_data)} meta")
+            
+            # 合并MS2
             all_ms2_data.update(ms2_data)
             all_meta_data.append(meta_data)
-
-        # 2. Merge metadata (align columns)
+        
+        # 2. 合并Meta数据（确保列对齐）
         if len(all_meta_data) > 1:
             all_cols = set()
             for df in all_meta_data:
@@ -2212,30 +2209,30 @@ class MS2BioTextDataset(Dataset):
         
         external_ms2_data = all_ms2_data
         
-        print(f"\nMerged external dataset: {len(external_ms2_data)} spectra, {len(external_meta_data)} meta")
-
-        # 3. Use HMDB.ID as the index
+        print(f"\n✓ 合并后外部数据集: {len(external_ms2_data)} 光谱, {len(external_meta_data)} meta")
+        
+        # 3. 设置HMDB.ID为索引
         if 'HMDB.ID' in external_meta_data.columns:
             external_meta_data = external_meta_data.set_index('HMDB.ID')
-            print(f"  Set HMDB.ID as the index")
-
-        # 4. Ensure MS2 data format is correct (add molecule_id field)
-        print("\nFixing MS2 data format...")
+            print(f"  已设置HMDB.ID为索引")
+        
+        # 4. 确保MS2数据格式正确（添加molecule_id字段）
+        print("\n🔧 修正MS2数据格式...")
         for spectrum_id, spectrum_data in external_ms2_data.items():
             if 'molecule_id' not in spectrum_data:
                 molecule_id = spectrum_id.split('_')[0]
                 spectrum_data['molecule_id'] = molecule_id
-
-        # 5. Collect all unique HMDB IDs
+        
+        # 5. 获取所有unique的HMDB IDs
         unique_hmdb_ids = set()
         for spec_id in external_ms2_data.keys():
             hmdb_id = spec_id.split('_')[0]
             unique_hmdb_ids.add(hmdb_id)
-
-        print(f"  External dataset contains {len(unique_hmdb_ids)} unique HMDB IDs")
-
-        # 6. Load matching BioText data
-        print("\nLoading BioText data...")
+        
+        print(f"  外部数据集包含 {len(unique_hmdb_ids)} 个unique HMDB IDs")
+        
+        # 6. 加载对应的BioText数据
+        print("\n📚 加载BioText数据...")
         external_biotext_data = {}
         missing_biotext = []
         
@@ -2243,7 +2240,7 @@ class MS2BioTextDataset(Dataset):
         paraphrase_dir = Path(paraphrase_dir) if paraphrase_dir else None
         
         for hmdb_id in unique_hmdb_ids:
-            # Skip malformed HMDB IDs (e.g., those containing '{}')
+            # 处理异常的HMDB ID（如包含{}的）
             if '{}' in hmdb_id:
                 missing_biotext.append(hmdb_id)
                 continue
@@ -2253,7 +2250,7 @@ class MS2BioTextDataset(Dataset):
                 with open(biotext_file, 'r', encoding='utf-8') as f:
                     original_text = f.read().strip()
                 
-                # Load paraphrases if present
+                # 加载paraphrase（如果有）
                 paraphrases = []
                 if paraphrase_dir:
                     paraphrase_file = paraphrase_dir / f"{hmdb_id}_paraphrase.txt"
@@ -2274,19 +2271,19 @@ class MS2BioTextDataset(Dataset):
             else:
                 missing_biotext.append(hmdb_id)
         
-        print(f"  Loaded {len(external_biotext_data)} BioText entries")
-        print(f"  Missing BioText: {len(missing_biotext)}")
-
-        # 7. Handle missing BioText (using the drop method)
+        print(f"  ✓ 成功加载 {len(external_biotext_data)} 个BioText")
+        print(f"  ✗ 缺失BioText: {len(missing_biotext)} 个")
+        
+        # 7. 处理缺失的biotext（使用drop方法）
         initial_ms2_count = len(external_ms2_data)
         external_ms2_data, _ = MS2BioTextDataset.missing_biotext_handling(
-            external_ms2_data,
-            external_biotext_data,
+            external_ms2_data, 
+            external_biotext_data, 
             method="drop"
         )
-        print(f"  Dropped {initial_ms2_count - len(external_ms2_data)} spectra missing BioText")
-
-        # 8. Update meta_data, keeping only entries with MS2 data
+        print(f"  删除 {initial_ms2_count - len(external_ms2_data)} 条缺失biotext的光谱")
+        
+        # 8. 更新meta_data，只保留有MS2数据的条目
         remaining_hmdb_ids = set()
         for spectrum_id in external_ms2_data.keys():
             hmdb_id = spectrum_id.split('_')[0]
@@ -2294,15 +2291,15 @@ class MS2BioTextDataset(Dataset):
         
         external_meta_data = external_meta_data[external_meta_data.index.isin(remaining_hmdb_ids)]
         
-        # 9. Fill in precursor data
-        print("\nFilling precursor data...")
+        # 9. 填充precursor数据
+        print("\n⚙️ 填充precursor数据...")
         external_meta_data = MS2BioTextDataset.fill_precursor_data(
             external_meta_data,
             external_ms2_data
         )
         
-        # 10. Preprocess MS2 data (no augmentation for test set)
-        print("\nPreprocessing MS2 data (no augmentation)...")
+        # 10. 预处理MS2数据（测试集不做数据增强）
+        print("\n🚀 预处理MS2数据（不进行数据增强）...")
         external_processed_ms2, external_word2idx = MS2BioTextDataset.preprocess_ms2_data_positive_only_parallel(
             external_ms2_data,
             external_meta_data,
@@ -2311,7 +2308,7 @@ class MS2BioTextDataset(Dataset):
             precursor_value=getattr(args, 'precursor_value', 2.0)
         )
         
-        # 11. Statistics
+        # 11. 统计信息
         data_statistics = {
             'original_ms2_count': initial_ms2_count,
             'processed_ms2_count': len(external_processed_ms2),
@@ -2323,18 +2320,18 @@ class MS2BioTextDataset(Dataset):
         }
         
         print("\n" + "="*60)
-        print("Final statistics for the external test dataset")
+        print("📊 外部测试数据集最终统计")
         print("="*60)
-        print(f"  Original MS2 spectra: {data_statistics['original_ms2_count']}")
-        print(f"  Processed MS2 spectra: {data_statistics['processed_ms2_count']}")
-        print(f"  Meta records: {data_statistics['meta_count']}")
-        print(f"  BioText records: {data_statistics['biotext_count']}")
-        print(f"  Unique molecules: {data_statistics['unique_molecules']}")
-        print(f"  Vocabulary size: {data_statistics['vocab_size']}")
-        print(f"  Source datasets: {', '.join(data_statistics['datasets'])}")
-
-        # 12. Create the Dataset instance
-        print("\nBuilding external test Dataset instance...")
+        print(f"  原始MS2光谱数: {data_statistics['original_ms2_count']}")
+        print(f"  处理后MS2光谱数: {data_statistics['processed_ms2_count']}")
+        print(f"  Meta记录数: {data_statistics['meta_count']}")
+        print(f"  BioText数: {data_statistics['biotext_count']}")
+        print(f"  Unique分子数: {data_statistics['unique_molecules']}")
+        print(f"  词汇表大小: {data_statistics['vocab_size']}")
+        print(f"  数据集来源: {', '.join(data_statistics['datasets'])}")
+        
+        # 12. 创建Dataset实例
+        print("\n🎯 创建外部测试Dataset实例...")
         external_test_dataset = MS2BioTextDataset(
             ms2_data=external_processed_ms2,
             meta_data=external_meta_data,
@@ -2344,7 +2341,7 @@ class MS2BioTextDataset(Dataset):
             **kwargs
         )
         
-        print(f"External test Dataset built successfully. Size: {len(external_test_dataset)}")
+        print(f"✅ 外部测试Dataset创建成功！大小: {len(external_test_dataset)}")
         
         return external_test_dataset, data_statistics
 
@@ -2496,7 +2493,7 @@ class MS2BioTextDataset(Dataset):
         
     #     # --- 1. Define split file path ---
     #     data_dir = Path(data_dir)
-    #     split_file_path = data_dir / 'ms2_split.json'  # renamed to distinguish the new split scheme
+    #     split_file_path = data_dir / 'ms2_split.json'  # 改名以区分新的划分方式
         
     #     # --- 2. Load existing split file if valid; otherwise create new split ---
     #     train_ms2_ids, test_ms2_ids = None, None
@@ -2517,7 +2514,7 @@ class MS2BioTextDataset(Dataset):
     #     if train_ms2_ids is None or test_ms2_ids is None:
     #         print(f"⚠️ No valid split file found. Creating a new MS2-level split...")
             
-    #         # Group MS2 spectra by molecule ID
+    #         # 按分子ID分组MS2谱图
     #         molecule_to_ms2 = {}
     #         for ms2_id, ms2_info in ms2_data.items():
     #             mol_id = ms2_info['molecule_id']
@@ -2525,7 +2522,7 @@ class MS2BioTextDataset(Dataset):
     #                 molecule_to_ms2[mol_id] = []
     #             molecule_to_ms2[mol_id].append(ms2_id)
             
-    #         # Statistics
+    #         # 统计信息
     #         single_ms2_molecules = []
     #         multi_ms2_molecules = []
     #         for mol_id, ms2_list in molecule_to_ms2.items():
@@ -2541,22 +2538,22 @@ class MS2BioTextDataset(Dataset):
     #         train_ms2_ids = []
     #         test_ms2_ids = []
             
-    #         # Molecules with a single MS2: put all into the training set
+    #         # 处理只有一个MS2的分子：全部放入训练集
     #         for mol_id in single_ms2_molecules:
     #             train_ms2_ids.extend(molecule_to_ms2[mol_id])
-
-    #         # Molecules with multiple MS2: randomly pick one for test, rest for training
+            
+    #         # 处理有多个MS2的分子：随机选择一个作为测试集，其余作为训练集
     #         for mol_id in multi_ms2_molecules:
     #             ms2_list = molecule_to_ms2[mol_id]
-    #             # Randomly pick one MS2 as the test sample
+    #             # 随机选择一个MS2作为测试集
     #             test_ms2_id = np.random.choice(ms2_list)
     #             test_ms2_ids.append(test_ms2_id)
-    #             # The rest go to the training set
+    #             # 其余的作为训练集
     #             train_ms2_ids.extend([ms2_id for ms2_id in ms2_list if ms2_id != test_ms2_id])
             
     #         print(f"    Split results: {len(train_ms2_ids)} training MS2, {len(test_ms2_ids)} test MS2")
             
-    #         # Save the split result
+    #         # 保存划分结果
     #         print(f"    Saving new split to: {split_file_path}")
     #         split_data_to_save = {
     #             'train_ms2_ids': train_ms2_ids, 
@@ -2571,16 +2568,16 @@ class MS2BioTextDataset(Dataset):
     #     train_ms2_ids_set = set(train_ms2_ids)
     #     test_ms2_ids_set = set(test_ms2_ids)
         
-    #     # Filter MS2 data
+    #     # 过滤MS2数据
     #     train_ms2_data = {ms2_id: info for ms2_id, info in ms2_data.items() if ms2_id in train_ms2_ids_set}
     #     test_ms2_data = {ms2_id: info for ms2_id, info in ms2_data.items() if ms2_id in test_ms2_ids_set}
-
-    #     # Get the molecule IDs involved
+        
+    #     # 获取涉及的分子ID
     #     train_molecule_ids = set(info['molecule_id'] for info in train_ms2_data.values())
     #     test_molecule_ids = set(info['molecule_id'] for info in test_ms2_data.values())
-
-    #     # Filter metadata and biotext data
-    #     # Note: train and test sets may share molecule IDs (different MS2 of the same molecule may split across both)
+        
+    #     # 过滤元数据和biotext数据
+    #     # 注意：训练集和测试集可能包含相同的分子ID（因为同一分子的不同MS2可能分布在训练集和测试集中）
     #     train_meta_data = meta_data[meta_data.index.isin(train_molecule_ids)]
     #     test_meta_data = meta_data[meta_data.index.isin(test_molecule_ids)]
         
@@ -2617,21 +2614,21 @@ class MS2BioTextDataset(Dataset):
     @staticmethod
     def filter_shared_texts(biotext_data, max_sharing_molecules=5):
         """
-        Remove texts shared by too many molecules.
-
+        删除被过多molecule共享的text
+        
         Args:
             biotext_data: {molecule_id: [{'type': ..., 'text': ...}, ...]}
-            max_sharing_molecules: max number of molecules a text may be shared by
-
+            max_sharing_molecules: text最多可以被多少个molecule共享
+        
         Returns:
-            filtered_biotext_data: cleaned data
-            stats: statistics
+            filtered_biotext_data: 清洗后的数据
+            stats: 统计信息
         """
         from collections import defaultdict
-
+        
         print(f"\n=== Filtering shared texts (max_sharing={max_sharing_molecules}) ===")
-
-        # 1. Build inverted index: text -> molecules
+        
+        # 1. 构建text -> molecules的倒排索引
         text_to_molecules = defaultdict(set)
         
         for mol_id, entry in biotext_data.items():
@@ -2644,10 +2641,10 @@ class MS2BioTextDataset(Dataset):
                 texts = [entry]
             
             for text in texts:
-                if text:  # skip empty strings
+                if text:  # 避免空字符串
                     text_to_molecules[text].add(mol_id)
-
-        # 2. Find high-frequency texts to remove
+        
+        # 2. 找出需要删除的高频text
         texts_to_remove = set()
         for text, molecules in text_to_molecules.items():
             if len(molecules) > max_sharing_molecules:
@@ -2655,15 +2652,15 @@ class MS2BioTextDataset(Dataset):
         
         print(f"Found {len(texts_to_remove)} texts shared by >{max_sharing_molecules} molecules")
         
-        # 3. Remove these high-frequency texts from each molecule's candidate list
+        # 3. 从每个molecule的候选text中删除这些高频text
         filtered_biotext_data = {}
         total_removed = 0
         molecules_with_no_text = []
         
         for mol_id, entry in biotext_data.items():
             if isinstance(entry, list):
-                # New format: list
-                filtered_entry = [record for record in entry
+                # 新格式：列表
+                filtered_entry = [record for record in entry 
                                 if record['text'] not in texts_to_remove]
                 
                 if filtered_entry:
@@ -2674,13 +2671,13 @@ class MS2BioTextDataset(Dataset):
                 total_removed += len(entry) - len(filtered_entry)
                 
             elif isinstance(entry, dict):
-                # Old format: dict
+                # 旧格式：字典
                 original = entry.get("original", "")
                 paraphrases = entry.get("paraphrases", [])
-
+                
                 filtered_paraphrases = [p for p in paraphrases if p not in texts_to_remove]
-
-                # If the original was also removed, use the first paraphrase as the original
+                
+                # 如果original也被删除了，用第一个paraphrase作为original
                 if original in texts_to_remove:
                     if filtered_paraphrases:
                         original = filtered_paraphrases[0]
@@ -2699,13 +2696,13 @@ class MS2BioTextDataset(Dataset):
                                 (1 - original_count))
                 
             elif isinstance(entry, str):
-                # String format
+                # 字符串格式
                 if entry not in texts_to_remove:
                     filtered_biotext_data[mol_id] = entry
                 else:
                     molecules_with_no_text.append(mol_id)
         
-        # 4. Statistics
+        # 4. 统计信息
         print(f"Statistics:")
         print(f"  Total text entries removed: {total_removed}")
         print(f"  Molecules before filtering: {len(biotext_data)}")
@@ -2716,7 +2713,7 @@ class MS2BioTextDataset(Dataset):
             print(f"  Warning: {len(molecules_with_no_text)} molecules lost all texts!")
             print(f"  First 5: {molecules_with_no_text[:5]}")
         
-        # 5. Verify filtering results
+        # 5. 验证过滤效果
         text_to_molecules_after = defaultdict(set)
         for mol_id, entry in filtered_biotext_data.items():
             texts = []
@@ -2799,15 +2796,15 @@ class MS2BioTextDataset(Dataset):
         if test_ms2_ids is None:
             print(f"⚠️ No valid split file found. Creating a new MS2-level split...")
             
-            # Group MS2 spectra by molecule ID
+            # 按分子ID分组MS2谱图
             molecule_to_ms2 = {}
             for ms2_id, ms2_info in ms2_data.items():
                 mol_id = ms2_info['molecule_id']
                 if mol_id not in molecule_to_ms2:
                     molecule_to_ms2[mol_id] = []
                 molecule_to_ms2[mol_id].append(ms2_id)
-
-            # Statistics
+            
+            # 统计信息
             single_ms2_molecules = []
             multi_ms2_molecules = []
             for mol_id, ms2_list in molecule_to_ms2.items():
@@ -2821,16 +2818,16 @@ class MS2BioTextDataset(Dataset):
             
             test_ms2_ids = []
             
-            # Molecules with multiple MS2: randomly pick one as the test sample
+            # 处理有多个MS2的分子：随机选择一个作为测试集
             for mol_id in multi_ms2_molecules:
                 ms2_list = molecule_to_ms2[mol_id]
-                # Randomly pick one MS2 as the test sample
+                # 随机选择一个MS2作为测试集
                 test_ms2_id = np.random.choice(ms2_list)
                 test_ms2_ids.append(test_ms2_id)
-
+            
             print(f"    Created new test set with {len(test_ms2_ids)} MS2 spectra")
-
-            # Save the split result (only test_ms2_ids; train is computed dynamically)
+            
+            # 保存划分结果（只保存test_ms2_ids，train会动态计算）
             print(f"    Saving new split to: {split_file_path}")
             split_data_to_save = {
                 'test_ms2_ids': test_ms2_ids,
@@ -2851,15 +2848,15 @@ class MS2BioTextDataset(Dataset):
         print(f"    Test MS2 spectra: {len(test_ms2_ids_set)}")
         print(f"    Training MS2 spectra: {len(train_ms2_ids_set)}")
         
-        # Filter MS2 data
+        # 过滤MS2数据
         train_ms2_data = {ms2_id: info for ms2_id, info in ms2_data.items() if ms2_id in train_ms2_ids_set}
         test_ms2_data = {ms2_id: info for ms2_id, info in ms2_data.items() if ms2_id in test_ms2_ids_set}
-
-        # Get the molecule IDs involved
+        
+        # 获取涉及的分子ID
         train_molecule_ids = set(info['molecule_id'] for info in train_ms2_data.values())
         test_molecule_ids = set(info['molecule_id'] for info in test_ms2_data.values())
-
-        # Filter metadata and biotext data
+        
+        # 过滤元数据和biotext数据
         train_meta_data = meta_data[meta_data.index.isin(train_molecule_ids)]
         test_meta_data = meta_data[meta_data.index.isin(test_molecule_ids)]
         
@@ -2902,21 +2899,21 @@ class MS2BioTextDataset(Dataset):
 
 
 
-# Placed at the top of the file, after the imports and before the class definition
+# 在文件顶部，import 语句之后，类定义之前
 
 def _augment_worker(batch_data):
     """
-    Global worker function for data augmentation.
+    全局 worker 函数，用于数据增强
     batch_data: (batch, filter_threshold, noise_ratio, noise_intensity_range, augment_multiplier)
     """
     import numpy as np
-    # Important: do NOT import MS2BioTextDataset; define the needed functions inline here
-
+    # ⚠️ 关键修改：不要导入 MS2BioTextDataset，直接在这里定义需要的函数
+    
     batch, filter_threshold, noise_ratio, noise_intensity_range, augment_multiplier = batch_data
-
-    # Copy the logic of filter_low_intensity_peaks and add_noise_peaks directly here
+    
+    # 将 filter_low_intensity_peaks 和 add_noise_peaks 的逻辑直接复制到这里
     def filter_low_intensity_peaks(peaks, intensities, threshold):
-        """Filter out low-intensity peaks."""
+        """过滤低强度峰"""
         if not peaks or not intensities:
             return peaks, intensities
         
@@ -2934,62 +2931,62 @@ def _augment_worker(batch_data):
         return filtered_peaks, filtered_intensities
     
     def add_noise_peaks(peaks, intensities, noise_ratio, noise_intensity_range):
-        """Add noise peaks."""
+        """添加噪声峰"""
         import random
-
+        
         if not peaks:
             return peaks, intensities
-
+        
         n_noise = int(len(peaks) * noise_ratio)
         if n_noise == 0:
             return peaks, intensities
-
-        # Get the m/z range
+        
+        # 获取m/z范围
         min_mz = min(peaks)
         max_mz = max(peaks)
         max_intensity = max(intensities) if intensities else 1.0
-
-        # Generate noise peaks
+        
+        # 生成噪声峰
         for _ in range(n_noise):
-            # Random m/z (avoids exact duplicates of existing peaks)
+            # 随机m/z（避免与现有峰重复）
             noise_mz = random.uniform(min_mz, max_mz)
-            # Random low intensity
+            # 随机低强度
             noise_intensity = random.uniform(
                 noise_intensity_range[0] * max_intensity,
                 noise_intensity_range[1] * max_intensity
             )
-
+            
             peaks.append(noise_mz)
             intensities.append(noise_intensity)
-
-        # Sort by m/z
+        
+        # 按m/z排序
         sorted_pairs = sorted(zip(peaks, intensities), key=lambda x: x[0])
         peaks = [p for p, _ in sorted_pairs]
         intensities = [i for _, i in sorted_pairs]
-
+        
         return peaks, intensities
-
-    # Processing logic
+    
+    # 处理逻辑
     result = {}
     for ms2_id, info in batch:
         molecule_id = info.get('molecule_id')
         peaks_original = info['mz'] if isinstance(info['mz'], list) else list(info['mz'])
         intensities_original = info['intensity'] if isinstance(info['intensity'], list) else list(info['intensity'])
-
-        # Filter
+        
+        # 过滤
         if filter_threshold:
             peaks_original, intensities_original = filter_low_intensity_peaks(
                 peaks_original, intensities_original, filter_threshold
             )
-
-        # Original version
+        
+        # 原始版本
         result[ms2_id] = {
             'mz': peaks_original,
             'intensity': intensities_original,
             'molecule_id': molecule_id
         }
-
-        # Augmented versions
+        
+        # 增强版本
         for aug_idx in range(1, augment_multiplier):
             peaks_aug, intensities_aug = add_noise_peaks(
                 peaks_original.copy(), intensities_original.copy(),
@@ -3005,35 +3002,35 @@ def _augment_worker(batch_data):
 
 def _preprocess_worker(batch_data):
     """
-    Global worker function for multiprocess preprocessing.
+    全局 worker 函数，用于多进程处理
     batch_data: (batch, word2idx, meta_data_processed, maxlen, max_frag, min_peaks, precursor_mode, precursor_value)
     """
     import numpy as np
     import pandas as pd
-
+    
     batch, word2idx, meta_data_processed, maxlen, max_frag, min_peaks, precursor_mode, precursor_value = batch_data
-
+    
     result = {}
     stats = {'kept': 0, 'filtered': 0}
-
+    
     for ms2_id, info in batch:
-        # Basic checks
+        # 基础检查
         if not info.get('mz'):
             stats['filtered'] += 1
             continue
-
-        # Convert to numpy arrays
+        
+        # 转为 numpy 数组
         peaks = np.asarray(info['mz'], dtype=float)
         intensities = np.asarray(info['intensity'], dtype=float)
         molecule_id = info.get('molecule_id', None)
-
-        # Length-alignment check
+        
+        # 长度对齐检查
         if peaks.shape[0] != intensities.shape[0]:
             n = min(len(peaks), len(intensities))
             peaks = peaks[:n]
             intensities = intensities[:n]
-
-        # Use the row matching the filename for polarity
+        
+        # 文件名对应行用于极性判断
         specific_row = meta_data_processed.loc[meta_data_processed["file_name"] == ms2_id] if "file_name" in meta_data_processed.columns else pd.DataFrame()
         if specific_row.empty:
             if molecule_id is not None:
@@ -3046,13 +3043,13 @@ def _preprocess_worker(batch_data):
             stats['filtered'] += 1
             continue
         
-        # Keep positive-ion only
+        # 只保留正离子
         pol = str(specific_row["Polarity"].values[0]).lower().strip() if "Polarity" in specific_row.columns else ""
         if pol != "positive":
             stats['filtered'] += 1
             continue
         
-        # Get precursor
+        # 获取precursor
         if 'HMDB.ID' in meta_data_processed.columns and (molecule_id is not None):
             row = meta_data_processed.loc[meta_data_processed['HMDB.ID'] == molecule_id]
         else:
@@ -3068,15 +3065,15 @@ def _preprocess_worker(batch_data):
             stats['filtered'] += 1
             continue
         
-        # Precursor range [10, 1000)
+        # 前体范围 [10, 1000)
         if pd.isna(precursor_val) or (precursor_val < 10.0) or (precursor_val >= 1000.0):
             stats['filtered'] += 1
             continue
-
+        
         precursor_val = min(precursor_val, 999.99)
         precursor_str = "%.2f" % precursor_val
-
-        # Filter peaks to [10, 1000)
+        
+        # 过滤峰到 [10, 1000)
         mask = (peaks >= 10.0) & (peaks < 1000.0) & np.isfinite(peaks) & np.isfinite(intensities)
         peaks = peaks[mask]
         intensities = intensities[mask]
@@ -3085,7 +3082,7 @@ def _preprocess_worker(batch_data):
             stats['filtered'] += 1
             continue
         
-        # Pick Top-K fragments by intensity
+        # 按强度选 Top-K 碎片
         if peaks.size > max_frag:
             idx = np.argpartition(intensities, -max_frag)[-max_frag:]
             order = np.argsort(peaks[idx])
@@ -3097,12 +3094,12 @@ def _preprocess_worker(batch_data):
             peaks_sel = peaks[order]
             intens_sel = intensities[order]
         
-        # Check min_peaks
+        # 检查 min_peaks
         if peaks_sel.size < min_peaks:
             stats['filtered'] += 1
             continue
-
-        # Build the token sequence
+        
+        # 构建 token 序列
         peaks_str = ["%.2f" % p for p in peaks_sel]
         try:
             token_ids = [word2idx[precursor_str]] + [word2idx[p] for p in peaks_str]
@@ -3110,35 +3107,35 @@ def _preprocess_worker(batch_data):
             stats['filtered'] += 1
             continue
         
-        # Choose processing based on precursor_mode
+        # ⭐ 根据 precursor_mode 选择处理方式
         if precursor_mode == 'scale_fixed':
-            # Option 1: scale fragments to fixed precursor_value (e.g. 20000), then prepend precursor 2
+            # 方案一：缩放fragments到固定值precursor_value（如20000），然后precursor添加2
             if np.max(intens_sel) > 0:
                 intens_sel = intens_sel / np.max(intens_sel) * precursor_value
             intens_seq = np.hstack((2.0, intens_sel))
-            # Normalize the whole sequence
+            # 整体归一化
             max_intensity = float(np.max(intens_seq))
             if max_intensity > 0:
                 intens_seq = intens_seq / max_intensity
-
+                
         elif precursor_mode == 'normalize_add':
-            # Option 2: normalize fragments to 1, prepend precursor_value, then normalize the whole sequence
+            # 方案二：归一化fragments到1，添加precursor_value，再整体归一化
             if np.max(intens_sel) > 0:
                 intens_sel = intens_sel / np.max(intens_sel)
             intens_seq = np.hstack((precursor_value, intens_sel))
-            # Normalize the whole sequence
+            # 整体归一化
             max_intensity = float(np.max(intens_seq))
             if max_intensity > 0:
                 intens_seq = intens_seq / max_intensity
-
+        
         else:
-            # Default: original MSBERT method
+            # 默认：原始MSBERT方式
             intens_seq = np.hstack((2.0, intens_sel))
             max_intensity = float(np.max(intens_seq))
             if max_intensity > 0:
                 intens_seq = intens_seq / max_intensity
-
-        # Pad or truncate to maxlen
+        
+        # Pad 或截断到 maxlen
         if len(token_ids) > maxlen:
             token_ids = token_ids[:maxlen]
             intens_seq = intens_seq[:maxlen]

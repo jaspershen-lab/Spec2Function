@@ -27,6 +27,7 @@ Large model and reference-database files are hosted on Hugging Face Hub
 | scikit-learn     | 1.3        | 1.5.0       |
 | huggingface_hub  | 0.20       | 0.23.4      |
 | openai           | 1.30       | 1.35.7      |
+| biopython        | 1.81       | 1.83        |
 | python-dotenv    | 1.0        | 1.0.1       |
 | tqdm             | 4.65       | 4.66.4      |
 
@@ -174,13 +175,28 @@ payload = {
     "peaks": [[60.08, 12.4], [86.10, 38.7], [104.11, 65.1], [184.07, 100.0]],
 }
 
-result = run_single(payload, top_k=10, user_focus="lipid metabolism")
+result = run_single(
+    payload,
+    top_k=10,
+    min_similarity=0.65,
+    user_focus="lipid metabolism",
+)
 
 print(result["top_metabolites"])      # de-duplicated metabolite names
 print(result["retrieved_fragments"])  # list of DB hits with `similarity`
-print(result["annotation"])           # LLM summary (if enabled)
+print(result["annotation"])           # LLM summary or abstention message
 print(result["papers"])               # PubMed hits (if enabled)
 ```
+
+`0.65` is the manuscript/default evidence-support threshold. It may be
+explicitly overridden with `min_similarity` for exploratory analyses. When the
+maximum spectrum-to-FemDB cosine is below the configured threshold, the result
+has `status="insufficient_evidence"`; no LLM annotation is requested and
+`llm_called` remains `False`. The gate measures evidence support, not the
+probability that an annotation is correct.
+
+When PubMed retrieval is enabled, Mode 1 queries the five highest-ranked
+unique metabolite candidates, matching the reported workflow.
 
 ### 4.2 Metabolite set
 
@@ -208,6 +224,9 @@ result = run_set(
     min_abs_logfc=0.5,
     max_pvalue=0.05,
     min_features=5,
+    retrieval_method="centroid",  # or "voting"
+    top_k=5,
+    min_similarity=0.65,
 )
 
 print(result["story"])         # global functional summary (LLM)
@@ -215,6 +234,17 @@ print(result["clusters"])      # per-cluster reports + top metabolites
 print(result["plot_data"])     # t-SNE coordinates with cluster labels
 print(result["filter"])        # filter info: total/kept/columns used
 ```
+
+The same evidence gate is applied independently to every cluster. Unsupported
+clusters are returned with `status="insufficient_evidence"` and are excluded
+from LLM theme, report, PubMed-query, and global-story generation. The returned
+top-level `evidence_gate` object reports cluster coverage at the configured
+threshold.
+
+Mode 2 defaults to centroid retrieval with five FemDB candidates per cluster.
+Set `retrieval_method="voting"` to retrieve candidates independently for every
+spectrum and rank metabolites by vote count, with maximum cosine similarity as
+the tie-breaker.
 
 If too few features pass the filters you get
 `{"error": "Too few features selected (N)", "filter": {...}}`.

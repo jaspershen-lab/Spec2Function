@@ -12,6 +12,12 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from sklearn.metrics import silhouette_score
 
+from .evidence_gate import (
+    DEFAULT_EVIDENCE_THRESHOLD,
+    INSUFFICIENT_EVIDENCE_STATUS,
+    PREDICTED_STATUS,
+    evaluate_evidence_support,
+)
 from .single_analysis import SingleSpectrumAnalyzer, preprocess_spectrum
 
 
@@ -116,13 +122,38 @@ class MetaboliteSetAnalyzer(SingleSpectrumAnalyzer):
         return torch.stack(all_embeddings, dim=0)
 
     def retrieve_function_texts_from_centroid(
-        self, centroid: torch.Tensor, top_k: int = 10
+        self,
+        centroid: torch.Tensor,
+        top_k: int = 10,
+        min_similarity: Optional[float] = None,
     ) -> List[Dict]:
+        return self.retrieve_function_texts_with_evidence(
+            centroid,
+            top_k=top_k,
+            min_similarity=min_similarity,
+        )["retrieved_texts"]
+
+    def retrieve_function_texts_with_evidence(
+        self,
+        centroid: torch.Tensor,
+        top_k: int = 10,
+        min_similarity: Optional[float] = None,
+    ) -> Dict:
+        """Retrieve cluster evidence and return its gate decision."""
+
+        threshold = (
+            float(min_similarity)
+            if min_similarity is not None
+            else float(self.config.min_similarity)
+        )
         if centroid.dim() == 1:
             centroid = centroid.unsqueeze(0)
 
         if self.femdb_embeddings is None or len(self.femdb_embeddings) == 0:
-            return []
+            return {
+                "retrieved_texts": [],
+                "evidence_gate": evaluate_evidence_support(None, threshold),
+            }
 
         db_embeddings = self.femdb_embeddings.to(centroid.device)
         centroid_norm = torch.nn.functional.normalize(centroid, dim=1)
@@ -132,9 +163,15 @@ class MetaboliteSetAnalyzer(SingleSpectrumAnalyzer):
             sims = sims.squeeze(0)
 
         top_sims, top_idxs = torch.topk(sims, k=min(top_k * 2, len(sims)))
+        top_sims = top_sims.detach().cpu()
+        top_idxs = top_idxs.detach().cpu()
+        support_score = float(top_sims[0].item()) if len(top_sims) else None
+        gate = evaluate_evidence_support(support_score, threshold)
 
         hits = {}
         for s, idx in zip(top_sims.numpy(), top_idxs.numpy()):
+            if s < threshold:
+                continue
             frag = self.femdb_fragments[int(idx)]
             name = frag.get("molecule_name", "Unknown")
             if name not in hits:
@@ -144,13 +181,136 @@ class MetaboliteSetAnalyzer(SingleSpectrumAnalyzer):
                 if text:
                     hits[name]["texts"].append(text)
 
-        return sorted(hits.values(), key=lambda x: x["max_similarity"], reverse=True)[
-            :top_k
-        ]
+        return {
+            "retrieved_texts": sorted(
+                hits.values(), key=lambda x: x["max_similarity"], reverse=True
+            )[:top_k],
+            "evidence_gate": gate,
+        }
+
+    def retrieve_function_texts_by_voting(
+        self,
+        embeddings: torch.Tensor,
+        top_k: int = 5,
+        min_similarity: Optional[float] = None,
+    ) -> List[Dict]:
+        """Retrieve cluster evidence by voting across member spectra."""
+
+        return self.retrieve_function_texts_by_voting_with_evidence(
+            embeddings,
+            top_k=top_k,
+            min_similarity=min_similarity,
+        )["retrieved_texts"]
+
+    def retrieve_function_texts_by_voting_with_evidence(
+        self,
+        embeddings: torch.Tensor,
+        top_k: int = 5,
+        min_similarity: Optional[float] = None,
+    ) -> Dict:
+        """Retrieve per-spectrum matches and aggregate them by vote count.
+
+        Each cluster member contributes at most one vote per metabolite. Ties
+        are resolved by maximum cosine similarity. The cluster support score is
+        the maximum spectrum-to-FemDB cosine observed across all members.
+        """
+
+        threshold = (
+            float(min_similarity)
+            if min_similarity is not None
+            else float(self.config.min_similarity)
+        )
+        if embeddings.dim() == 1:
+            embeddings = embeddings.unsqueeze(0)
+
+        if self.femdb_embeddings is None or len(self.femdb_embeddings) == 0:
+            return {
+                "retrieved_texts": [],
+                "evidence_gate": evaluate_evidence_support(None, threshold),
+            }
+
+        db_embeddings = self.femdb_embeddings.to(embeddings.device)
+        embeddings_norm = torch.nn.functional.normalize(embeddings, dim=1)
+        db_norm = torch.nn.functional.normalize(db_embeddings, dim=1)
+        all_similarities = torch.mm(embeddings_norm, db_norm.t())
+
+        votes = {}
+        support_score = None
+        for similarities in all_similarities:
+            top_sims, top_idxs = torch.topk(
+                similarities,
+                k=min(top_k * 2, len(similarities)),
+            )
+            top_sims = top_sims.detach().cpu()
+            top_idxs = top_idxs.detach().cpu()
+            if len(top_sims):
+                sample_support = float(top_sims[0].item())
+                support_score = (
+                    sample_support
+                    if support_score is None
+                    else max(support_score, sample_support)
+                )
+
+            seen_in_spectrum = set()
+            for similarity, idx in zip(top_sims.numpy(), top_idxs.numpy()):
+                if similarity < threshold:
+                    continue
+
+                fragment = self.femdb_fragments[int(idx)]
+                name = fragment.get("molecule_name", "Unknown")
+                if name in seen_in_spectrum:
+                    continue
+
+                seen_in_spectrum.add(name)
+                hit = votes.setdefault(
+                    name,
+                    {
+                        "name": name,
+                        "max_similarity": float(similarity),
+                        "vote_count": 0,
+                        "texts": [],
+                    },
+                )
+                hit["vote_count"] += 1
+                hit["max_similarity"] = max(
+                    hit["max_similarity"], float(similarity)
+                )
+                text = fragment.get("text", "")
+                if text and text not in hit["texts"] and len(hit["texts"]) < 2:
+                    hit["texts"].append(text)
+
+                if len(seen_in_spectrum) >= top_k:
+                    break
+
+        ranked = sorted(
+            votes.values(),
+            key=lambda hit: (hit["vote_count"], hit["max_similarity"]),
+            reverse=True,
+        )[:top_k]
+        return {
+            "retrieved_texts": ranked,
+            "evidence_gate": evaluate_evidence_support(support_score, threshold),
+        }
 
     def run_semi_supervised_analysis(
-        self, df: pd.DataFrame, background_info: Optional[str] = None
+        self,
+        df: pd.DataFrame,
+        background_info: Optional[str] = None,
+        retrieval_method: str = "centroid",
+        top_k: int = 5,
+        min_similarity: Optional[float] = None,
     ) -> Dict:
+        retrieval_method = str(retrieval_method).strip().lower()
+        if retrieval_method not in {"centroid", "voting"}:
+            raise ValueError("retrieval_method must be 'centroid' or 'voting'.")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+            raise ValueError("top_k must be a positive integer.")
+
+        threshold = (
+            float(min_similarity)
+            if min_similarity is not None
+            else float(self.config.min_similarity)
+        )
         cols = list(df.columns)
         col_spec = next((c for c in cols if "spectrum" in c.lower()), None)
         col_anno = next(
@@ -310,59 +470,96 @@ class MetaboliteSetAnalyzer(SingleSpectrumAnalyzer):
                     top_metabolites = []
 
                 text_hits = []
+                evidence_gate = evaluate_evidence_support(None, threshold)
                 if centroid is not None:
-                    text_hits = self.retrieve_function_texts_from_centroid(centroid, top_k=10)
-
-                if self.gpt:
-                    try:
-                        functional_name, theme_prompt = self.gpt.generate_cluster_functional_name(
-                            cluster_stats=info,
-                            top_metabolites=top_metabolites,
-                            retrieved_texts=text_hits,
-                            background_info=background_info,
-                            debug_output_path=None,
-                            return_prompt=True,
+                    if retrieval_method == "voting":
+                        cluster_embeddings = torch.tensor(embeds[cluster_positions])
+                        retrieval = self.retrieve_function_texts_by_voting_with_evidence(
+                            cluster_embeddings,
+                            top_k=top_k,
+                            min_similarity=threshold,
                         )
-                    except Exception:
+                    else:
+                        retrieval = self.retrieve_function_texts_with_evidence(
+                            centroid,
+                            top_k=top_k,
+                            min_similarity=threshold,
+                        )
+                    text_hits = retrieval["retrieved_texts"]
+                    evidence_gate = retrieval["evidence_gate"]
+
+                llm_called = False
+                if evidence_gate["status"] == INSUFFICIENT_EVIDENCE_STATUS:
+                    functional_name = "Insufficient evidence"
+                    theme_prompt = None
+                    cluster_report = evidence_gate["message"]
+                    papers = []
+                else:
+                    if self.gpt:
+                        llm_called = True
+                        try:
+                            functional_name, theme_prompt = self.gpt.generate_cluster_functional_name(
+                                cluster_stats=info,
+                                top_metabolites=top_metabolites,
+                                retrieved_texts=text_hits,
+                                background_info=background_info,
+                                debug_output_path=None,
+                                return_prompt=True,
+                            )
+                        except Exception:
+                            functional_name = f"Metabolic Cluster {cid+1}"
+                            theme_prompt = None
+                    else:
                         functional_name = f"Metabolic Cluster {cid+1}"
                         theme_prompt = None
-                else:
-                    functional_name = f"Metabolic Cluster {cid+1}"
-                    theme_prompt = None
 
-                if self.gpt:
-                    try:
-                        cluster_report = self.gpt.generate_cluster_report(
-                            cluster_stats=info,
-                            functional_name=functional_name,
-                            top_metabolites=top_metabolites,
-                            retrieved_texts=text_hits,
-                            example_logfc=c_df[col_fc].tolist() if col_fc else None,
-                            background_info=background_info,
-                        )
-                    except Exception:
-                        cluster_report = f"Report generation failed for {functional_name}."
-                else:
-                    cluster_report = "GPT is disabled. Provide a GPTInference instance to enable it."
-
-                papers = []
-                if len(c_df) > 2 and self.pubmed:
-                    try:
-                        if self.gpt:
-                            pubmed_query = self.gpt.generate_pubmed_query(
+                    if self.gpt:
+                        try:
+                            cluster_report = self.gpt.generate_cluster_report(
+                                cluster_stats=info,
                                 functional_name=functional_name,
                                 top_metabolites=top_metabolites,
+                                retrieved_texts=text_hits,
+                                example_logfc=c_df[col_fc].tolist() if col_fc else None,
                                 background_info=background_info,
                             )
-                        else:
-                            pubmed_query = top_metabolites[0][0] if top_metabolites else functional_name
+                        except Exception:
+                            cluster_report = f"Report generation failed for {functional_name}."
+                    else:
+                        cluster_report = "GPT is disabled. Provide a GPTInference instance to enable it."
 
-                        papers = self.pubmed.search_by_metabolites([pubmed_query], max_results=3)
-                    except Exception:
-                        papers = []
+                    papers = []
+                    if len(c_df) > 2 and self.pubmed:
+                        try:
+                            if self.gpt:
+                                pubmed_query = self.gpt.generate_pubmed_query(
+                                    functional_name=functional_name,
+                                    top_metabolites=top_metabolites,
+                                    background_info=background_info,
+                                )
+                            else:
+                                pubmed_query = (
+                                    top_metabolites[0][0]
+                                    if top_metabolites
+                                    else functional_name
+                                )
+
+                            papers = self.pubmed.search_by_metabolites(
+                                [pubmed_query], max_results=3
+                            )
+                        except Exception:
+                            papers = []
 
                 cluster_info = {
                     "id": cid + 1,
+                    "status": evidence_gate["status"],
+                    "evidence_gate": evidence_gate,
+                    "support_score": evidence_gate["support_score"],
+                    "support_threshold": evidence_gate["threshold"],
+                    "retrieval_method": retrieval_method,
+                    "top_k": top_k,
+                    "insufficient_evidence_reason": evidence_gate["reason"],
+                    "llm_called": llm_called,
                     "functional_name": functional_name,
                     "report": cluster_report,
                     "type": "Confirmed" if len(known_df) > 0 else "Inferred",
@@ -383,10 +580,23 @@ class MetaboliteSetAnalyzer(SingleSpectrumAnalyzer):
 
         cluster_reports.sort(key=lambda x: abs(x["avg_logfc"]), reverse=True)
 
-        if self.gpt:
+        supported_reports = [
+            report
+            for report in cluster_reports
+            if report["status"] == PREDICTED_STATUS
+        ]
+
+        if not supported_reports:
+            story = (
+                "Insufficient evidence: no cluster met the configured "
+                f"{threshold:.2f} spectrum-to-FemDB support threshold. "
+                "No global functional interpretation was generated."
+            )
+        elif self.gpt:
             try:
                 story = self.gpt.generate_global_story(
-                    cluster_reports=cluster_reports, background_info=background_info
+                    cluster_reports=supported_reports,
+                    background_info=background_info,
                 )
             except Exception as exc:
                 story = f"GPT generation failed: {exc}"
@@ -402,8 +612,29 @@ class MetaboliteSetAnalyzer(SingleSpectrumAnalyzer):
         if "variable_id" not in plot_df.columns:
             plot_df["variable_id"] = plot_df.index.astype(str)
 
+        n_total = len(cluster_reports)
+        n_predicted = len(supported_reports)
+        n_insufficient = n_total - n_predicted
+
         return {
+            "status": (
+                PREDICTED_STATUS if n_predicted else INSUFFICIENT_EVIDENCE_STATUS
+            ),
+            "llm_called": bool(self.gpt and supported_reports),
+            "evidence_gate": {
+                "support_metric": "maximum_spectrum_to_femdb_cosine",
+                "threshold": threshold,
+                "default_threshold": DEFAULT_EVIDENCE_THRESHOLD,
+                "threshold_overridden": threshold != DEFAULT_EVIDENCE_THRESHOLD,
+                "n_total_clusters": n_total,
+                "n_predicted_clusters": n_predicted,
+                "n_insufficient_evidence_clusters": n_insufficient,
+                "coverage": n_predicted / n_total if n_total else 0.0,
+                "interpretation": "evidence_support_only_not_correctness_guarantee",
+            },
             "story": story,
+            "retrieval_method": retrieval_method,
+            "top_k": top_k,
             "clusters": cluster_reports,
             "plot_data": plot_df[
                 ["variable_id", "tsne_x", "tsne_y", "cluster_id", "Annotator"]

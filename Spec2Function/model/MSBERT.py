@@ -250,8 +250,8 @@ class MSBERT(nn.Module):
         for idx, transformer in enumerate(self.transformer_blocks):
             output = transformer.forward(output, atten_mask)
         
-        # Return raw transformer output without pooling.
-        # Used by MS2BioText's cross-attention.
+        # 直接返回transformer输出，不进行池化
+        # 用于MS2BioText的cross-attention
         return output, atten_mask
 
 

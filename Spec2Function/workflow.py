@@ -9,6 +9,7 @@ import pandas as pd
 
 from .single_analysis import SingleSpectrumAnalyzer
 from .set_analysis import MetaboliteSetAnalyzer
+from .evidence_gate import INSUFFICIENT_EVIDENCE_STATUS
 
 SpectrumInput = Union[str, Dict[str, Any]]
 CSVInput = Union[str, Path, pd.DataFrame]
@@ -130,6 +131,7 @@ class MS2BioTextWorkflow:
         json_input: SpectrumInput,
         *,
         top_k: int = 10,
+        min_similarity: Optional[float] = None,
         user_focus: Optional[str] = None,
         selected_pmids: Optional[Iterable[str]] = None,
         include_annotation: bool = True,
@@ -140,16 +142,24 @@ class MS2BioTextWorkflow:
             spectrum["intensity"],
             precursor_mz=spectrum["precursor_mz"],
             top_k=top_k,
+            min_similarity=min_similarity,
         )
 
         if include_annotation:
-            papers = _filter_papers(result.get("papers", []), selected_pmids)
-            annotation = self.analyzer.generate_annotation(
-                retrieved_fragments=result.get("retrieved_fragments", []),
-                papers=papers,
-                user_focus=user_focus,
-            )
-            result["annotation"] = annotation
+            gate = result.get("evidence_gate", {})
+            if gate.get("status") == INSUFFICIENT_EVIDENCE_STATUS:
+                result["annotation"] = gate["message"]
+                result["llm_called"] = False
+            else:
+                papers = _filter_papers(result.get("papers", []), selected_pmids)
+                annotation = self.analyzer.generate_annotation(
+                    retrieved_fragments=result.get("retrieved_fragments", []),
+                    papers=papers,
+                    user_focus=user_focus,
+                    threshold=result.get("support_threshold"),
+                )
+                result["annotation"] = annotation
+                result["llm_called"] = getattr(self.analyzer, "gpt", None) is not None
         return result
 
     def run_set(
@@ -160,6 +170,9 @@ class MS2BioTextWorkflow:
         min_abs_logfc: float = 0.1,
         max_pvalue: float = 0.05,
         min_features: int = 5,
+        retrieval_method: str = "centroid",
+        top_k: int = 5,
+        min_similarity: Optional[float] = None,
     ) -> Dict[str, Any]:
         df = load_set_dataframe(data)
         filtered, info = filter_set_dataframe(df, min_abs_logfc, max_pvalue)
@@ -171,7 +184,11 @@ class MS2BioTextWorkflow:
             }
 
         result = self.analyzer.run_semi_supervised_analysis(
-            filtered, background_info=background_info
+            filtered,
+            background_info=background_info,
+            retrieval_method=retrieval_method,
+            top_k=top_k,
+            min_similarity=min_similarity,
         )
         result["filter"] = info
         return result
@@ -185,6 +202,7 @@ def run_single(
     device=None,
     enable_gpt_pubmed: bool = True,
     top_k: int = 10,
+    min_similarity: Optional[float] = None,
     user_focus: Optional[str] = None,
     selected_pmids: Optional[Iterable[str]] = None,
     include_annotation: bool = True,
@@ -199,6 +217,7 @@ def run_single(
     return workflow.run_single(
         json_input,
         top_k=top_k,
+        min_similarity=min_similarity,
         user_focus=user_focus,
         selected_pmids=selected_pmids,
         include_annotation=include_annotation,
@@ -216,6 +235,9 @@ def run_set(
     min_abs_logfc: float = 0.1,
     max_pvalue: float = 0.05,
     min_features: int = 5,
+    retrieval_method: str = "centroid",
+    top_k: int = 5,
+    min_similarity: Optional[float] = None,
 ) -> Dict[str, Any]:
     analyzer = _ensure_analyzer(
         analyzer,
@@ -230,4 +252,7 @@ def run_set(
         min_abs_logfc=min_abs_logfc,
         max_pvalue=max_pvalue,
         min_features=min_features,
+        retrieval_method=retrieval_method,
+        top_k=top_k,
+        min_similarity=min_similarity,
     )

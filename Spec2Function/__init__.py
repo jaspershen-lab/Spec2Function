@@ -2,6 +2,12 @@ from .model_manager import Spec2FunctionManager, manager
 from .gpt_inference import GPTInference
 from .pubmed import PubMedSearcher
 from .config import Spec2FunctionConfig, config
+from .evidence_gate import (
+    DEFAULT_EVIDENCE_THRESHOLD,
+    INSUFFICIENT_EVIDENCE_STATUS,
+    PREDICTED_STATUS,
+    evaluate_evidence_support,
+)
 from .utils import parse_mgf, parse_msp, preprocess_spectrum
 from .single_analysis import (
     SingleSpectrumAnalyzer,
@@ -23,6 +29,10 @@ __all__ = [
     "PubMedSearcher",
     "Spec2FunctionConfig",
     "config",
+    "DEFAULT_EVIDENCE_THRESHOLD",
+    "INSUFFICIENT_EVIDENCE_STATUS",
+    "PREDICTED_STATUS",
+    "evaluate_evidence_support",
     "parse_mgf",
     "parse_msp",
     "preprocess_spectrum",
