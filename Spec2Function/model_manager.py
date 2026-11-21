@@ -191,7 +191,7 @@ class Spec2FunctionManager:
     def _load_and_index_data(self):
         try:
             cache = torch.load(self.config.femdb_embeddings, weights_only=False)
-            self.femdb_embeddings = cache['embeddings'].to('cpu')
+            self.femdb_embeddings = cache['embeddings'].to(device='cpu', dtype=torch.float32)
             self.femdb_fragments = []
             self.metadata_index = defaultdict(list)
             with open(self.config.femdb_jsonl, 'r', encoding='utf-8') as f:
