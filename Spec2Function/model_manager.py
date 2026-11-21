@@ -673,11 +673,18 @@ class Spec2FunctionManager:
 
     def run_semi_supervised_analysis(self, df: pd.DataFrame, background_info: str = None,
                                        retrieval_method: str = 'centroid', top_k: int = 5,
-                                        min_similarity: float = None):
+                                        min_similarity: float = None,
+                                        remove_redundancy: bool = False,
+                                        redundancy_rt_tolerance: float = 5.0,
+                                        redundancy_ion_mode: str = 'positive'):
         """
-        Note: translated content removed.
+        Mode 2: cluster a metabolite set into functional modules and annotate each module.
         retrieval_method: 'centroid' or 'voting'
         top_k: number of top results to retrieve
+        remove_redundancy: if True, redundant ions of one compound (adducts, in-source water
+            loss, dimers, 13C isotopes; co-elution within redundancy_rt_tolerance seconds) are
+            collapsed to one ion per module before module annotation. Default False.
+        redundancy_ion_mode: 'positive' or 'negative' (ion types used by the rule)
         """
         threshold = float(
             getattr(self.config, 'min_similarity', DEFAULT_EVIDENCE_THRESHOLD)
@@ -814,15 +821,34 @@ class Spec2FunctionManager:
                 print(f"OK t-SNE failed: {e}")
                 return {"error": f"t-SNE failed: {str(e)}"}
 
-            # Note: translated comment removed.
+            # Optional redundant-ion removal (within modules; module assignment unchanged)
+            redundancy = {"enabled": False, "applied": False}
+            if remove_redundancy:
+                from .redundancy import mark_redundant_features
+
+                redundancy = mark_redundant_features(
+                    df, valid_idx, parsed,
+                    ion_mode=redundancy_ion_mode,
+                    rt_tolerance=redundancy_rt_tolerance,
+                )
+                print(f" {redundancy['message']}")
+            if redundancy.get("applied"):
+                retained = (~df.loc[valid_idx, 'is_redundant'].astype(bool)).to_numpy()
+            else:
+                retained = np.ones(len(valid_idx), dtype=bool)
+
             print("=" * 80)
             cluster_reports = []
             
             for cid in range(n_clusters):
                 try:
-                    c_df = df[df['cluster_id'] == cid]
-                    if len(c_df) == 0:
+                    c_all = df[df['cluster_id'] == cid]
+                    if len(c_all) == 0:
                         continue
+                    if redundancy.get("applied"):
+                        c_df = c_all[~c_all['is_redundant'].astype(bool)]
+                    else:
+                        c_df = c_all
                     
                     print(f"\n CLUSTER {cid+1} Analysis:")
                     print("-" * 80)
@@ -854,7 +880,7 @@ class Spec2FunctionManager:
                         "direction": direction,
                         "direction_label": direction_label,
                         "logfc_interpretation": logfc_interpretation,  # 
-                        "tsne_center": [float(c_df['tsne_x'].mean()), float(c_df['tsne_y'].mean())]
+                        "tsne_center": [float(c_all['tsne_x'].mean()), float(c_all['tsne_y'].mean())]
                     }
                     
                     print(f"   Basic Stats:")
@@ -864,7 +890,9 @@ class Spec2FunctionManager:
                     
                     # Note: translated comment removed.
                     cluster_mask = df.loc[valid_idx, 'cluster_id'] == cid
-                    cluster_positions = [i for i, mask_val in enumerate(cluster_mask) if mask_val]
+                    cluster_positions = [
+                        i for i, mask_val in enumerate(cluster_mask) if mask_val and retained[i]
+                    ]
                     
                     if cluster_positions:
                         centroid = torch.tensor(embeds[cluster_positions]).mean(0)
@@ -1077,6 +1105,8 @@ class Spec2FunctionManager:
                         "type": "Confirmed" if len(known_df) > 0 else "Inferred",
                         "known_count": info["known_count"],
                         "unknown_count": info["unknown_count"],
+                        "n_features": len(c_all),
+                        "n_redundant_removed": len(c_all) - len(c_df),
                         "avg_logfc": info["avg_logfc"],
                         "direction": info["direction"],
                         "direction_label": info["direction_label"],
@@ -1207,7 +1237,11 @@ class Spec2FunctionManager:
                 },
                 "story": story,
                 "clusters": cluster_reports,
-                "plot_data": plot_df[['variable_id', 'tsne_x', 'tsne_y', 'cluster_id', 'Annotator']].to_dict('records'),
+                "redundancy_removal": redundancy,
+                "plot_data": plot_df[
+                    ['variable_id', 'tsne_x', 'tsne_y', 'cluster_id', 'Annotator']
+                    + (['is_redundant', 'representative_id'] if redundancy.get("applied") else [])
+                ].to_dict('records'),
             }
             
             print(f"OK Analysis complete! {len(cluster_reports)} clusters, {len(plot_df)} samples")

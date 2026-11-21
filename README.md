@@ -246,6 +246,38 @@ Set `retrieval_method="voting"` to retrieve candidates independently for every
 spectrum and rank metabolites by vote count, with maximum cosine similarity as
 the tie-breaker.
 
+#### Optional: remove redundant ions (off by default)
+
+In untargeted LC-MS one compound often appears as several features (adducts such
+as [M+H]+ / [M+Na]+ / [M+K]+ / [M+NH4]+, in-source water loss, [2M+H]+ dimers and
+¹³C isotopes). These redundant ions can be collapsed before module annotation:
+
+```python
+result = run_set(
+    "my_features.csv",
+    remove_redundancy=True,          # default False
+    redundancy_ion_mode="positive",  # or "negative"
+    redundancy_rt_tolerance=5.0,     # co-elution window in seconds
+)
+print(result["redundancy_removal"])  # summary: n_features, n_redundant, link types, ...
+```
+
+Rule (as in the manuscript's redundant-ion analysis): two features are linked when
+they co-elute within the RT tolerance and their m/z values back-calculate to the same
+neutral mass under two of the common ion types of the chosen polarity, or differ by a
+¹³C / ¹³C₂ spacing (m/z tolerance max(5 mDa, 10 ppm)). Linked features form compound
+groups; within each module only the ion with the largest MS2 total ion current is kept
+for retrieval, statistics and LLM naming. Clustering and t-SNE are unchanged, so module
+assignment is identical to a run without removal. Every feature stays in `plot_data`,
+with `is_redundant` and `representative_id` (the ion kept for its group); each cluster
+reports `n_features` and `n_redundant_removed`.
+
+m/z and RT (seconds) are read from `variable_id` when it has the tidyMass form
+`mz<m/z>rt<RT>`, otherwise from `mz`/`precursor_mz` and `rt` columns (RT values all
+≤ 60 are treated as minutes). Without m/z and RT the step is skipped and reported in
+`result["redundancy_removal"]["message"]`. The grouping functions are also available
+directly: `Spec2Function.group_redundant_ions`, `Spec2Function.mark_redundant_features`.
+
 If too few features pass the filters you get
 `{"error": "Too few features selected (N)", "filter": {...}}`.
 

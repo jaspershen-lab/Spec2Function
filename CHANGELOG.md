@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Mode 2 option to remove redundant ions (`remove_redundancy`, default `False`;
+  `redundancy_ion_mode`, `redundancy_rt_tolerance`) in `run_set`,
+  `MetaboliteSetAnalyzer.run_semi_supervised_analysis` and
+  `Spec2FunctionManager.run_semi_supervised_analysis`. Co-eluting adducts,
+  in-source water loss, dimers and 13C isotopes of one compound are collapsed to
+  the ion with the largest MS2 TIC within each module before annotation; module
+  assignment is unchanged. New module `Spec2Function.redundancy`.
+- Source synced with the PyPI 0.2.2 release (evidence gate, retrieval options, tests).
+
 ## 0.2.0 — 2026-04-25
 
 ### License change (breaking for commercial users)

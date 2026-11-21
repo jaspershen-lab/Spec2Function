@@ -15,6 +15,7 @@ from .single_analysis import (
     build_gpt_pubmed_from_spec2function_root,
 )
 from .set_analysis import MetaboliteSetAnalyzer
+from .redundancy import group_redundant_ions, mark_redundant_features
 from .workflow import (
     MS2BioTextWorkflow,
     run_single,
@@ -38,6 +39,8 @@ __all__ = [
     "preprocess_spectrum",
     "SingleSpectrumAnalyzer",
     "MetaboliteSetAnalyzer",
+    "group_redundant_ions",
+    "mark_redundant_features",
     "MS2BioTextAnalysisConfig",
     "build_gpt_pubmed_from_spec2function_root",
     "MS2BioTextWorkflow",

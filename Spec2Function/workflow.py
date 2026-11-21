@@ -173,6 +173,9 @@ class MS2BioTextWorkflow:
         retrieval_method: str = "centroid",
         top_k: int = 5,
         min_similarity: Optional[float] = None,
+        remove_redundancy: bool = False,
+        redundancy_rt_tolerance: float = 5.0,
+        redundancy_ion_mode: str = "positive",
     ) -> Dict[str, Any]:
         df = load_set_dataframe(data)
         filtered, info = filter_set_dataframe(df, min_abs_logfc, max_pvalue)
@@ -189,6 +192,9 @@ class MS2BioTextWorkflow:
             retrieval_method=retrieval_method,
             top_k=top_k,
             min_similarity=min_similarity,
+            remove_redundancy=remove_redundancy,
+            redundancy_rt_tolerance=redundancy_rt_tolerance,
+            redundancy_ion_mode=redundancy_ion_mode,
         )
         result["filter"] = info
         return result
@@ -238,6 +244,9 @@ def run_set(
     retrieval_method: str = "centroid",
     top_k: int = 5,
     min_similarity: Optional[float] = None,
+    remove_redundancy: bool = False,
+    redundancy_rt_tolerance: float = 5.0,
+    redundancy_ion_mode: str = "positive",
 ) -> Dict[str, Any]:
     analyzer = _ensure_analyzer(
         analyzer,
@@ -255,4 +264,7 @@ def run_set(
         retrieval_method=retrieval_method,
         top_k=top_k,
         min_similarity=min_similarity,
+        remove_redundancy=remove_redundancy,
+        redundancy_rt_tolerance=redundancy_rt_tolerance,
+        redundancy_ion_mode=redundancy_ion_mode,
     )
